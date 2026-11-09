@@ -60,7 +60,8 @@
 
   function defaultConfig() {
     const d = clone(window.GS_DEFAULT_CONFIG);
-    return { projects: d.projects, targets: d.targets, mileageRate: d.mileageRate, settings: defaultSettings() };
+    const st = defaultSettings(); st.tiers = { A: 0.2, B: 0.15, C: 0.1, D: 0.05 };
+    return { projects: d.projects, targets: d.targets, mileageRate: d.mileageRate, materials: [], settings: st };
   }
   function defaultSettings() {
     const d = clone(window.GS_BILLING_DEFAULTS);
@@ -77,7 +78,8 @@
     for (const k of new Set([...Object.keys(defP), ...Object.keys(savedP)])) s.projects[k] = Object.assign({}, defP[k] || {}, savedP[k] || {});
     s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
     s.invoiced = (c.settings && c.settings.invoiced) || [];
-    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, settings: s };
+    s.tiers = Object.assign({ A: 0.2, B: 0.15, C: 0.1, D: 0.05 }, (c.settings && c.settings.tiers) || {});
+    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], settings: s };
   }
 
   const state = {
@@ -126,10 +128,9 @@
     if (!window.XLSX) { toast('The spreadsheet reader did not load. Check your connection and reload.'); return; }
     toast('Reading ' + file.name + ' ...', 10000);
     try {
-      const names = ['Timesheet', 'Config', 'Working Days'];
-      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', sheets: names });
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
       const sheets = {};
-      for (const n of names) if (wb.Sheets[n]) sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null });
+      for (const n of wb.SheetNames) sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null });
       if (!sheets.Timesheet) throw new Error('This workbook has no Timesheet tab.');
       from = from || state.settings.fromDate || '2026-09-01';
       const parsed = C.parseWorkbook(sheets, { fromDate: from });
@@ -143,6 +144,7 @@
       }
       if (parsed.mileageRate) cfg.mileageRate = parsed.mileageRate;
       for (const [mk, t] of Object.entries(parsed.targets)) if (t.target) cfg.targets[mk] = { target: t.target, targetDays: t.targetDays || t.netDays || 21 };
+      cfg.materials = (cfg.materials || []).filter(m => m.source !== 'workbook').concat(C.parseMaterials(sheets));
       cfg.settings.fromDate = from;
       cfg.settings.importedAt = new Date().toISOString(); cfg.settings.importedFile = file.name;
       toast('Saving ' + entries.length + ' entries ...', 10000);
@@ -177,7 +179,7 @@
   $('#fileInput').addEventListener('change', e => { importWorkbook(e.target.files[0], $('#impFrom')?.value); e.target.value = ''; });
 
   // ---------- routing ----------
-  const VIEWS = ['dashboard', 'timesheet', 'invoicing', 'setup'];
+  const VIEWS = ['dashboard', 'timesheet', 'invoicing', 'materials', 'setup'];
   function route() {
     const h = (location.hash || '').replace('#', '');
     state.view = VIEWS.includes(h) ? h : 'dashboard';
@@ -187,7 +189,7 @@
     if (!state.data) { $('#view-loading').hidden = false; return; }
     if (state.firstRun && state.view !== 'setup') { renderWelcome($('#view-empty')); $('#view-empty').hidden = false; return; }
     const el = $('#view-' + state.view); el.hidden = false;
-    ({ dashboard: renderDashboard, timesheet: renderTimesheet, invoicing: renderInvoicing, setup: renderSetup })[state.view](el);
+    ({ dashboard: renderDashboard, timesheet: renderTimesheet, invoicing: renderInvoicing, materials: renderMaterials, setup: renderSetup })[state.view](el);
   }
   window.addEventListener('hashchange', route);
   const go = v => { if (location.hash === '#' + v) route(); else location.hash = v; };
@@ -622,6 +624,7 @@
   // ======================================================================
   function billableClients(start, end) {
     const m = new Map();
+    for (const x of (state.config.materials || [])) if (!x.invoice && x.date <= end) m.set(x.client, (m.get(x.client) || 0) + C.matCalc(x).total);
     for (const r of state.data.rows) if (r.date >= start && r.date <= end && isBillable(r.client) && (r.amount || r.kms)) m.set(r.client, (m.get(r.client) || 0) + r.amount + r.kmAmt);
     return [...m.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   }
@@ -652,19 +655,41 @@
   }
   const tripKey = d => state.inv.client + '|' + d.project + '|' + d.date;
   function tripFor(d) { const t = (state.settings.trips || {})[tripKey(d)]; return t !== undefined ? t : d.kmNotes.join('; '); }
+  // ----- landscaping materials on invoices -----
+  function invMats() {
+    const inv = state.inv; if (!inv || !inv.land) return [];
+    const num = (inv.meta && inv.meta.number) || '';
+    return (state.config.materials || []).filter(m => m.client === inv.client && m.date <= inv.end && (!m.invoice || m.invoice === num))
+      .sort((a, b) => (a.date + a.item).localeCompare(b.date + b.item));
+  }
+  function includedMats() { const off = state.inv.matOff || {}; return invMats().filter(m => !off[m.id]); }
+  const matSum = list => C.round2(list.reduce((a, m) => a + C.matCalc(m).total, 0));
+  function ensureMatLine() {
+    const inv = state.inv;
+    if (inv.land && includedMats().length && !inv.lines.some(l => l.kind === 'mat')) inv.lines.unshift({ id: Math.max(0, ...inv.lines.map(l => l.id)) + 1, kind: 'mat', project: '', description: 'Plants & Landscaping Materials as per schedule emailed' });
+  }
+  function firstProjectFor(client, start, end) {
+    const m = new Map();
+    for (const r of state.data.rows) if (r.client === client && r.date >= start && r.date <= end) m.set(r.project, (m.get(r.project) || 0) + r.amount + r.kmAmt + 0.001);
+    return [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '*';
+  }
   function computeInv() {
     const inv = state.inv;
     if (inv.sf) {
       const desc = C.sfDescriptions(inv.days, allocFor);
       inv.lines.forEach(l => { if (l.kind === 'alloc' && l.auto) l.description = desc[l.cat]; });
     }
-    return C.computeLines(inv.lines, inv.days, inv.assign, allocFor);
+    return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0 });
   }
 
   function startInvoice(client, projects, start, end) {
     if (!projects || !projects.length) projects = client ? defaultProjects(client, start, end) : [];
     state.inv = { client, projects: projects || [], start, end, assign: {}, lines: null, meta: null };
-    state.inv.sf = billingFor(client, (projects && projects[0]) || defaultProjects(client, start, end)[0] || '*').schedule === 'sf';
+    const first = (projects && projects[0]) || firstProjectFor(client, start, end);
+    const bs = billingFor(client, first).schedule;
+    state.inv.sf = bs === 'sf';
+    state.inv.land = bs === 'land' || (!state.inv.sf && (first === 'Landscaping' || (first === '*' && (state.config.materials || []).some(m => m.client === client))));
+    state.inv.matOff = {};
     rebuildInvoice(true);
   }
 
@@ -674,7 +699,7 @@
     const monthTxt = (() => { const [y, m] = inv.end.split('-').map(Number); return `${C.MONTHS[m - 1]} ${y}`; })();
     const bill = p => { const b = billingFor(inv.client, p); return { ...b, header: (b.header || '').replace('{month}', monthTxt) }; };
     const firstProj = inv.days.find(x => x.hours)?.project || '*';
-    inv.lines = inv.sf ? C.sfLines(inv.days, allocFor, bill(firstProj).header) : C.defaultLines(inv.days, bill, { consultant: state.settings.consultant });
+    inv.lines = inv.land ? C.landLines(inv.days, includedMats()) : inv.sf ? C.sfLines(inv.days, allocFor, bill(firstProj).header) : C.defaultLines(inv.days, bill, { consultant: state.settings.consultant });
     inv.assign = {};
     if (resetMeta || !inv.meta) {
       const projs = [...new Set(inv.days.map(x => x.project))];
@@ -691,6 +716,21 @@
     inv.result = null;
   }
 
+
+  // Landscaping: materials table on the schedule (sell prices only; cost and margin stay private)
+  function matTableHTML() {
+    const list = invMats(), off = state.inv.matOff || {};
+    if (!list.length) return `<div class="doc-section no-print"><h3>Materials</h3><p class="muted">No uninvoiced materials for ${esc(state.inv.client)} up to ${C.fmtDateNZ(state.inv.end)}. Add them on the <a href="#materials">Materials</a> page.</p></div>`;
+    const inc = list.filter(m => !off[m.id]);
+    return `<div class="doc-section"><h3>Materials</h3><div class="table-wrap"><table>
+      <thead><tr><th class="no-print"></th><th>Month</th><th>Item</th><th>Supplier</th><th>Unit</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+      <tbody>${list.map(m => { const c = C.matCalc(m), isOff = !!off[m.id]; return `<tr class="${isOff ? 'mat-off no-print' : ''}">
+        <td class="no-print"><input type="checkbox" data-matoff="${esc(m.id)}" ${isOff ? '' : 'checked'} aria-label="Include ${esc(m.item)}"></td>
+        <td>${C.MONTHS[+m.date.slice(5, 7) - 1]}</td><td>${esc(m.item)}</td><td>${esc(m.supplier)}</td><td>${esc(m.unit)}</td>
+        <td class="num">${hrs(m.qty)}</td><td class="num">${money(c.unitPrice)}</td><td class="num">${money(c.total)}</td></tr>`; }).join('')}</tbody>
+      <tfoot><tr><td class="no-print"></td><td colspan="6">Total materials</td><td class="num">${money(matSum(inc))}</td></tr></tfoot>
+    </table></div><p class="note no-print">Untick anything that should wait for a later invoice. Unticked items are left off the PDF and the invoice.</p></div>`;
+  }
 
   // Sports field schedule table (matches the SF month tabs)
   function sfTableHTML(days) {
@@ -757,6 +797,7 @@
     const labour = timeLines.concat(allocLines).reduce((a, l) => a + l.amount, 0);
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
     const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
+    const matAmt = comp.lines.filter(l => l.kind === 'mat').reduce((a, l) => a + l.amount, 0);
     const projTitle = inv.projects.length ? inv.projects.join(', ') : [...new Set(workDays.map(x => x.project))].join(', ');
     const lineLabel = l => `Line ${comp.lines.indexOf(l) + 1}`;
 
@@ -781,6 +822,7 @@
               <div class="checklist">${projList.map(([p, x]) => `<label><input type="checkbox" value="${esc(p)}" ${!inv.projects.length || inv.projects.includes(p) ? 'checked' : ''}> ${esc(p)} <span class="num">${hrs(x.h)} h</span></label>`).join('') || '<span class="muted">None</span>'}</div>
             </div>
             <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iSF" ${inv.sf ? 'checked' : ''} style="margin-top:4px"> <span>Sports field schedule<br><span class="muted" style="font-size:.8rem">Split hours into Visits, P27, Reporting-Admin and Technical Support</span></span></label>
+            <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iLand" ${inv.land ? 'checked' : ''} style="margin-top:4px"> <span>Landscaping schedule<br><span class="muted" style="font-size:.8rem">Labour from the timesheet plus this client's materials</span></span></label>
             ${billingFor(inv.client, projList[0]?.[0]).check ? `<div class="callout">Check who this project is billed to on the Setup page.</div>` : ''}
           </div>
           <div class="panel">
@@ -788,6 +830,7 @@
             <div class="doc-totals" style="width:100%;margin:0">
               <div><span>Hours</span><span>${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</span></div>
               <div><span>Labour</span><span>${money(labour)}</span></div>
+              ${matAmt ? `<div><span>Materials</span><span>${money(matAmt)}</span></div>` : ''}
               ${vehicle ? `<div><span>Vehicle</span><span>${money(vehicle)}</span></div>` : ''}
               ${other ? `<div><span>Other items</span><span>${money(other)}</span></div>` : ''}
               <div><span>GST 15%</span><span>${money(comp.gst)}</span></div>
@@ -816,7 +859,7 @@
                 <div><span>Reference</span>${esc(m.reference) || '-'}</div>
                 <div><span>Consultant</span>${esc(state.settings.consultant)}</div>
               </div>
-${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table>
+${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.land ? '<h3 style="margin-bottom:8px">Labour</h3>' : ''}              <div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Activities</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Amount</th>${timeLines.length > 1 ? '<th class="no-print">Invoice line</th>' : ''}</tr></thead>
                 <tbody>${workDays.map(x => `<tr>
                   <td style="white-space:nowrap">${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}
@@ -827,6 +870,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total time</td><td class="num">${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</td><td></td><td class="num">${money(workDays.reduce((a, x) => a + x.amount, 0))}</td>${timeLines.length > 1 ? '<td class="no-print"></td>' : ''}</tr></tfoot>
               </table></div>
 `}
+              ${inv.land ? matTableHTML() : ''}
               ${kmDays.length ? `<div class="doc-section"><h3>Vehicle</h3><div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Trip</th><th class="num">Km</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
                 <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${(() => { const tv = tripFor(x); return `<input type="text" class="trip-in no-print" data-trip="${esc(x.key)}" value="${esc(tv)}" aria-label="Trip ${C.fmtDateNZ(x.date)}"><span class="print-only">${esc(tv) || '-'}</span>`; })()}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
@@ -834,6 +878,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
               </table></div></div>` : ''}
               <div class="doc-totals">
                 <div><span>Labour</span><span>${money(labour)}</span></div>
+                ${matAmt ? `<div><span>Materials</span><span>${money(matAmt)}</span></div>` : ''}
                 ${vehicle ? `<div><span>Vehicle</span><span>${money(vehicle)}</span></div>` : ''}
                 ${other ? `<div><span>Other items</span><span>${money(other)}</span></div>` : ''}
                 <div><span>Subtotal (excl GST)</span><span>${money(comp.subtotal)}</span></div>
@@ -859,7 +904,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
             <div class="table-wrap"><table class="xero-lines">
               <thead><tr><th style="width:44%">Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Account</th><th>Tax rate</th><th class="num">Amount NZD</th><th></th></tr></thead>
               <tbody>${comp.lines.map((l, i) => `<tr class="${l.kind === 'heading' ? 'heading-row' : ''}">
-                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item', alloc: { visits: 'Site visits', admin: 'Reporting-Admin', tech: 'Technical Support', p27: 'P27' }[l.cat] + (l.quantity ? '' : ' · no hours, left off the invoice') }[l.kind]}</div>
+                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item', mat: 'Materials', alloc: { visits: 'Site visits', admin: 'Reporting-Admin', tech: 'Technical Support', p27: 'P27' }[l.cat] + (l.quantity ? '' : ' · no hours, left off the invoice') }[l.kind]}</div>
                   <textarea rows="${l.kind === 'heading' ? 3 : 2}" data-desc="${i}" aria-label="Description line ${i + 1}">${esc(l.description)}</textarea></td>
                 ${l.kind === 'heading' ? '<td colspan="5" class="muted" style="font-size:.8rem">Description only</td>' : `
                 <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : hrs(l.quantity)}</td>
@@ -910,7 +955,9 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
       saveSettings(); toast('Trip name saved');
       const sp = inp.nextElementSibling; if (sp) sp.textContent = inp.value.trim() || '-';
     });
-    $('#iSF').onchange = e => { inv.sf = e.target.checked; rebuildInvoice(false); rerender(); };
+    $('#iSF').onchange = e => { inv.sf = e.target.checked; if (inv.sf) inv.land = false; rebuildInvoice(false); rerender(); };
+    $('#iLand').onchange = e => { inv.land = e.target.checked; if (inv.land) inv.sf = false; inv.matOff = {}; rebuildInvoice(false); rerender(); };
+    $$('[data-matoff]', el).forEach(cb => cb.onchange = () => { inv.matOff[cb.dataset.matoff] = !cb.checked; ensureMatLine(); const y = window.scrollY; rerender(); window.scrollTo({ top: y }); });
     $$('[data-alloc]', el).forEach(inp => inp.onchange = () => {
       const d = inv.days.find(x => x.key === inp.dataset.alloc); if (!d) return;
       const v = inp.value === '' ? 0 : +inp.value;
@@ -966,6 +1013,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
     // move the suggested next number on
     const n = (number || inv.meta.number || '').match(/^(.*?)(\d+)$/);
     if (n && (number || inv.meta.number) === state.settings.nextInvoiceNumber) state.settings.nextInvoiceNumber = n[1] + String(+n[2] + 1).padStart(n[2].length, '0');
+    if (inv.land) { const num = number || inv.meta.number || 'invoiced'; includedMats().forEach(m => { m.invoice = num; }); }
     saveSettings();
   }
 
@@ -1041,7 +1089,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
           if (c.column.index === 9 && c.section !== 'head') c.cell.styles.textColor = c.cell.raw && c.cell.raw !== '0' ? [179, 65, 47] : [46, 125, 79];
         }
       });
-    } else {
+    } else if (workDays.length) {
       const head = ['Date', ...(multiProj ? ['Project'] : []), 'Activities', 'Hours', 'Rate', 'Amount'];
       const body = workDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), d.activityText || '-', hrs(d.hours), money(d.rate), money(d.amount)]);
       const off = multiProj ? 1 : 0;
@@ -1051,8 +1099,21 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
         didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 2 + off) c.cell.styles.halign = 'right'; }
       });
     }
-    y = doc.lastAutoTable.finalY + 8;
+    if (doc.lastAutoTable) y = doc.lastAutoTable.finalY + 8;
 
+    const mats = inv.land ? includedMats() : [];
+    if (mats.length) {
+      if (y > 250) { doc.addPage(); y = 18; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Materials', M, y); y += 2;
+      doc.autoTable({ ...base, startY: y,
+        head: [['Month', 'Item', 'Supplier', 'Unit', 'Qty', 'Unit price', 'Amount']],
+        body: mats.map(mm => { const c = C.matCalc(mm); return [C.MONTHS[+mm.date.slice(5, 7) - 1], mm.item, mm.supplier, mm.unit, hrs(mm.qty), money(c.unitPrice), money(c.total)]; }),
+        foot: [[{ content: 'Total materials', colSpan: 6 }, money(matSum(mats))]],
+        columnStyles: { 0: { cellWidth: 14 }, 2: { cellWidth: 26 }, 3: { cellWidth: 14 }, 4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 20, halign: 'right' }, 6: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 4) c.cell.styles.halign = 'right'; }
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    }
     if (kmDays.length) {
       if (y > 250) { doc.addPage(); y = 18; }
       doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Vehicle', M, y); y += 2;
@@ -1070,7 +1131,8 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
     const labour = comp.lines.filter(l => l.kind === 'time' || l.kind === 'alloc').reduce((a, l) => a + l.amount, 0);
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
     const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
-    const rows = [['Labour', money(labour)], ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other items', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
+    const matAmtP = comp.lines.filter(l => l.kind === 'mat').reduce((a, l) => a + l.amount, 0);
+    const rows = [...(labour || !matAmtP ? [['Labour', money(labour)]] : []), ...(matAmtP ? [['Materials', money(matAmtP)]] : []), ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other items', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
     if (y > 245) { doc.addPage(); y = 20; }
     const x0 = W - M - 80;
     doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(...ink);
@@ -1147,6 +1209,126 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
   }
 
 
+
+  // ======================================================================
+  // MATERIALS (landscaping client materials and subcontractors)
+  // ======================================================================
+  function renderMaterials(el) {
+    const cfg = state.config, s = state.settings, tiers = s.tiers;
+    cfg.materials = cfg.materials || [];
+    const landClients = [...new Set([...cfg.projects.filter(p => p.project === 'Landscaping').map(p => p.client), ...cfg.materials.map(m => m.client)])].sort((a, b) => a.localeCompare(b));
+    if (!state.matClient || !landClients.includes(state.matClient)) state.matClient = landClients.find(c => cfg.materials.some(m => m.client === c && !m.invoice)) || landClients[0] || '';
+    const show = state.matShow || 'open';
+    const list = cfg.materials.filter(m => m.client === state.matClient && (show === 'all' || !m.invoice)).sort((a, b) => (b.date + a.item).localeCompare(a.date + b.item));
+    const tierOpts = v => { const opts = [['A', tiers.A], ['B', tiers.B], ['C', tiers.C], ['D', tiers.D], ['0', 0]]; const known = opts.some(([, x]) => Math.abs(x - v) < 1e-9);
+      return opts.map(([k, x]) => `<option value="${x}" ${Math.abs(x - v) < 1e-9 ? 'selected' : ''}>${k === '0' ? 'No margin' : 'Tier ' + k} (${Math.round(x * 100)}%)</option>`).join('') + (known ? '' : `<option value="${v}" selected>Other (${Math.round(v * 1000) / 10}%)</option>`) + '<option value="custom">Other ...</option>'; };
+    const T = { cost: 0, sell: 0, margin: 0, incl: 0 };
+    const rowsH = list.map(m => { const c = C.matCalc(m); T.cost += c.costTotal; T.sell += c.total; T.margin += c.marginTotal; T.incl += c.totalIncl;
+      return `<tr data-mid="${esc(m.id)}">
+        <td><input type="month" data-mf="date" value="${esc(m.date.slice(0, 7))}" aria-label="Month"></td>
+        <td><input type="text" data-mf="item" value="${esc(m.item)}" aria-label="Item"></td>
+        <td><input type="text" data-mf="supplier" value="${esc(m.supplier)}" list="supplierList" aria-label="Supplier"></td>
+        <td><input type="text" data-mf="unit" value="${esc(m.unit)}" aria-label="Unit" style="width:5em"></td>
+        <td><input type="number" step="any" data-mf="qty" value="${m.qty}" aria-label="Quantity" style="width:5.5em;text-align:right"></td>
+        <td><input type="number" step="0.01" data-mf="cost" value="${C.round2(m.cost)}" aria-label="Cost per unit" style="width:6.5em;text-align:right"></td>
+        <td><select data-mf="margin" aria-label="Margin">${tierOpts(+m.margin || 0)}</select></td>
+        <td class="num">${money(c.unitPrice)}</td><td class="num"><strong>${money(c.total)}</strong></td><td class="num muted">${money(c.marginTotal)}</td>
+        <td>${m.invoice ? `<span class="chip ok">${esc(m.invoice)}</span> <button class="btn btn-small btn-quiet" data-unbill="${esc(m.id)}" title="Make this item available to invoice again">Undo</button>` : '<span class="chip warn">To invoice</span>'}</td>
+        <td><button class="btn btn-danger btn-small" data-mdel="${esc(m.id)}" aria-label="Delete ${esc(m.item)}" title="Delete">&times;</button></td>
+      </tr>`; }).join('');
+    const suppliers = [...new Set(cfg.materials.map(m => m.supplier).filter(Boolean))].sort();
+
+    el.innerHTML = `
+      <div class="view-head">
+        <div><div class="label">Materials</div><h1>${esc(state.matClient || 'Landscaping materials')}</h1></div>
+        <div class="controls">
+          <select id="mClient" aria-label="Client">${landClients.map(c => { const open = cfg.materials.filter(m => m.client === c && !m.invoice).length; return `<option value="${esc(c)}" ${c === state.matClient ? 'selected' : ''}>${esc(c)}${open ? ` (${open} to invoice)` : ''}</option>`; }).join('')}</select>
+          <div class="seg" role="group" aria-label="Show"><button id="mOpen" aria-pressed="${show === 'open'}">Not yet invoiced</button><button id="mAll" aria-pressed="${show === 'all'}">All</button></div>
+        </div>
+      </div>
+      <div class="kpis">
+        <div class="kpi lead"><span class="label">To charge (excl GST)</span><span class="value">${money0(T.sell)}</span><span class="sub">${money(T.incl)} incl GST</span></div>
+        <div class="kpi"><span class="label">Cost</span><span class="value">${money0(T.cost)}</span><span class="sub">${list.length} item${list.length === 1 ? '' : 's'}</span></div>
+        <div class="kpi"><span class="label">Margin</span><span class="value">${money0(T.margin)}</span><span class="sub">${T.sell ? Math.round(T.margin / T.sell * 100) : 0}% of sell price</span></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Materials and subcontractors</h2>
+          <div class="add-lines" style="margin:0"><button class="btn" id="mAdd">+ Add item</button><button class="btn btn-quiet" id="mPrep" ${list.some(m => !m.invoice) ? '' : 'disabled'}>Prepare invoice</button></div></div>
+        ${list.some(m => !m.invoice) ? `<form id="mBulk" class="add-lines" style="margin:0 0 12px;align-items:end">
+          <label class="field"><span>Already billed? Items up to</span><input type="month" id="mBulkTo" value="${esc(list.filter(m => !m.invoice).map(m => m.date.slice(0, 7)).sort().slice(-1)[0] || '')}"></label>
+          <label class="field"><span>Invoice number</span><input type="text" id="mBulkNo" placeholder="e.g. INV-0520" style="width:9em"></label>
+          <button class="btn btn-small btn-quiet" type="submit">Mark as invoiced</button></form>` : ''}
+        <div class="table-wrap"><table class="setup-table mat-table">
+          <thead><tr><th>Month</th><th>Item</th><th>Supplier</th><th>Unit</th><th class="num">Qty</th><th class="num">Cost $ (unit)</th><th>Margin</th><th class="num">Unit price</th><th class="num">Total excl GST</th><th class="num">Margin $</th><th>Invoice</th><th></th></tr></thead>
+          <tbody>${rowsH || `<tr><td colspan="12" class="muted">No ${show === 'open' ? 'uninvoiced ' : ''}materials for ${esc(state.matClient)}. Use Add item, or bring them in from the workbook below.</td></tr>`}</tbody>
+          <tfoot><tr><td colspan="7">Total</td><td></td><td class="num">${money(T.sell)}</td><td class="num">${money(T.margin)}</td><td colspan="2"></td></tr></tfoot>
+        </table></div>
+        <datalist id="supplierList">${suppliers.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+      </div>
+      <div class="grid-2">
+        <div class="panel" style="display:grid;gap:10px;align-content:start">
+          <h2>Margin tiers</h2>
+          <div class="add-lines" style="margin:0">${['A', 'B', 'C', 'D'].map(k => `<label class="field"><span>Tier ${k} %</span><input type="number" min="0" step="0.5" data-tier="${k}" value="${Math.round(tiers[k] * 1000) / 10}" style="width:6em"></label>`).join('')}</div>
+          <p class="note">Changing a tier updates the choices for new items. Items keep the margin they were given.</p>
+        </div>
+        <div class="panel" style="display:grid;gap:10px;align-content:start">
+          <h2>Bring in from the workbook</h2>
+          <p class="note">Reads every client tab with Month, ITEM, Supplier, Unit, Quantity, Cost and Margin columns. Replaces items previously brought in from the workbook; items added in the app are kept.</p>
+          <div><label class="btn btn-quiet" for="matFile">Choose workbook</label><input type="file" id="matFile" accept=".xlsx,.xlsm" hidden></div>
+        </div>
+      </div>`;
+
+    const rerender = () => { const y = window.scrollY; renderMaterials(el); window.scrollTo({ top: y }); };
+    const save = () => { state.inv = null; saveSettings(); };
+    $('#mClient').onchange = e => { state.matClient = e.target.value; rerender(); };
+    $('#mOpen').onclick = () => { state.matShow = 'open'; rerender(); };
+    $('#mAll').onclick = () => { state.matShow = 'all'; rerender(); };
+    $('#mAdd').onclick = () => {
+      const last = cfg.materials.filter(m => m.client === state.matClient).slice(-1)[0];
+      cfg.materials.push({ id: C.uid(), client: state.matClient, date: C.monthKey(todayISO()) + '-01', item: '', supplier: last ? last.supplier : '', unit: 'Ea', qty: 1, cost: 0, margin: tiers.A, source: 'app', invoice: '' });
+      save(); rerender(); const first = el.querySelector('tbody [data-mf="item"]'); if (first) first.focus();
+    };
+    $('#mPrep').onclick = () => {
+      const open = cfg.materials.filter(m => m.client === state.matClient && !m.invoice).map(m => m.date).sort();
+      startInvoice(state.matClient, [], C.monthStart(C.monthKey(open[0])), C.monthEnd(C.monthKey(open[open.length - 1]))); state.inv.land = true; state.inv.sf = false; rebuildInvoice(false); go('invoicing');
+    };
+    $$('[data-mf]', el).forEach(inp => inp.onchange = () => {
+      const m = cfg.materials.find(x => x.id === inp.closest('tr').dataset.mid); if (!m) return;
+      const f = inp.dataset.mf; let v = inp.value;
+      if (f === 'margin' && v === 'custom') { inp.outerHTML = `<input type="number" step="0.5" data-mf="marginPct" value="${Math.round(m.margin * 1000) / 10}" style="width:5em" aria-label="Margin percent">`; const ni = el.querySelector('[data-mf="marginPct"]'); ni.focus(); ni.onchange = () => { m.margin = (+ni.value || 0) / 100; save(); rerender(); }; return; }
+      if (f === 'date') m.date = (v || C.monthKey(todayISO())) + '-01';
+      else if (f === 'qty' || f === 'cost' || f === 'margin') m[f] = +v || 0;
+      else m[f] = v.trim();
+      save(); rerender();
+    });
+    $$('[data-mdel]', el).forEach(b => b.onclick = () => {
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Confirm'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.innerHTML = '&times;'; } }, 4000); return; }
+      cfg.materials = cfg.materials.filter(x => x.id !== b.dataset.mdel); save(); rerender(); toast('Item deleted');
+    });
+    $$('[data-unbill]', el).forEach(b => b.onclick = () => { const m = cfg.materials.find(x => x.id === b.dataset.unbill); if (m) { m.invoice = ''; save(); rerender(); } });
+    $('#mBulk')?.addEventListener('submit', e => {
+      e.preventDefault();
+      const to = $('#mBulkTo').value, no = $('#mBulkNo').value.trim();
+      if (!to || !no) { toast('Choose the month and enter the invoice number.'); return; }
+      let n = 0; cfg.materials.forEach(m => { if (m.client === state.matClient && !m.invoice && m.date.slice(0, 7) <= to) { m.invoice = no; n++; } });
+      save(); rerender(); toast(`${n} item${n === 1 ? '' : 's'} marked as ${no}`);
+    });
+    $$('[data-tier]', el).forEach(inp => inp.onchange = () => { tiers[inp.dataset.tier] = (+inp.value || 0) / 100; save(); rerender(); toast('Tier saved'); });
+    $('#matFile').onchange = async e => {
+      const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+      try {
+        const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        const sheets = {}; for (const n of wb.SheetNames) sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null });
+        const mats = C.parseMaterials(sheets);
+        // keep invoice stamps for items already invoiced in the app
+        const stamp = new Map(cfg.materials.filter(m => m.source === 'workbook' && m.invoice).map(m => [m.client + '|' + m.date + '|' + m.item + '|' + m.qty, m.invoice]));
+        mats.forEach(m => { const k = m.client + '|' + m.date + '|' + m.item + '|' + m.qty; if (stamp.has(k)) m.invoice = stamp.get(k); });
+        cfg.materials = cfg.materials.filter(m => m.source !== 'workbook').concat(mats);
+        save(); rerender(); toast(`Brought in ${mats.length} items from ${file.name}`, 4000);
+      } catch (err) { toast('Could not read the workbook: ' + err.message, 6000); }
+    };
+  }
+
   // ======================================================================
   // SETUP
   // ======================================================================
@@ -1207,7 +1389,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
             <td><input type="text" data-f="reference" value="${esc(p.reference)}" aria-label="Reference for ${esc(k)}"></td>
             <td><input type="text" data-f="header" value="${esc(p.header)}" aria-label="Heading for ${esc(k)}"></td>
             <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, tx]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${tx}</option>`).join('')}</select></td>
-            <td><select data-f="schedule" aria-label="Schedule type for ${esc(k)}"><option value="">Standard</option><option value="sf" ${p.schedule === 'sf' ? 'selected' : ''}>Sports fields</option></select></td></tr>`; }).join('')}</tbody>
+            <td><select data-f="schedule" aria-label="Schedule type for ${esc(k)}"><option value="">Standard</option><option value="sf" ${p.schedule === 'sf' ? 'selected' : ''}>Sports fields</option><option value="land" ${p.schedule === 'land' ? 'selected' : ''}>Landscaping</option></select></td></tr>`; }).join('')}</tbody>
         </table></div>
         <datalist id="contactList2">${contacts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       </div>

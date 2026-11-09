@@ -287,9 +287,45 @@
     return lines;
   }
 
+  // ---------- Landscaping materials (client tabs: Month / ITEM / Supplier / Unit / Quantity / Cost $ (unit) / Margin %) ----------
+  function matCalc(m) {
+    const qty = num(m.qty), cost = num(m.cost), margin = num(m.margin);
+    const unitPrice = round2(cost * (1 + margin));
+    const total = round2(qty * cost * (1 + margin)), costTotal = round2(qty * cost);
+    return { unitPrice, total, costTotal, marginTotal: round2(total - costTotal), gst: round2(total * 0.15), totalIncl: round2(total * 1.15) };
+  }
+  // Read every client tab that has an ITEM / Supplier / Quantity header row.
+  function parseMaterials(sheets, opts = {}) {
+    const year = opts.year || 2026;
+    const out = [];
+    for (const [name, rows] of Object.entries(sheets)) {
+      const h = rows.findIndex(r => r && r.some(v => str(v) === 'ITEM') && r.some(v => str(v) === 'Supplier') && r.some(v => str(v) === 'Quantity'));
+      if (h < 0) continue;
+      const col = {}; rows[h].forEach((v, i) => { const k = str(v); if (k && !(k in col)) col[k] = i; });
+      for (let i = h + 1; i < rows.length; i++) {
+        const r = rows[i]; if (!r) continue;
+        const item = str(r[col.ITEM]); if (!item) continue;
+        const mi = MONTHS.indexOf(str(r[col.Month]).slice(0, 3));
+        const qty = num(r[col.Quantity]), cost = num(r[col['Cost $ (unit)']]);
+        if (!qty && !cost) continue;
+        out.push({ id: uid(), client: name.trim(), date: mi >= 0 ? `${year}-${pad(mi + 1)}-01` : `${year}-01-01`, item, supplier: str(r[col.Supplier]), unit: str(r[col.Unit]),
+          qty, cost: Math.round(cost * 10000) / 10000, margin: num(r[col['Margin %']]), source: 'workbook', invoice: '' });
+      }
+    }
+    return out;
+  }
+  function landLines(days, mats, opts = {}) {
+    const work = days.filter(d => d.hours), kd = days.filter(d => d.kms);
+    let id = 1; const lines = [];
+    if (mats.length) lines.push({ id: id++, kind: 'mat', project: '', description: opts.matText || 'Plants & Landscaping Materials as per schedule emailed' });
+    if (work.length) lines.push({ id: id++, kind: 'time', project: work[0].project, description: `Labour as per schedule emailed (${rangeText(work[0].date, work[work.length - 1].date)})` });
+    if (kd.length) lines.push({ id: id++, kind: 'vehicle', project: '', description: `Vehicle (${rangeText(kd[0].date, kd[kd.length - 1].date)})` });
+    return lines;
+  }
+
   // Compute quantities/amounts for lines from day assignments.
   // assign: { dayKey: lineId } for time lines (defaults to the time line of that day's project).
-  function computeLines(lines, days, assign, allocFn) {
+  function computeLines(lines, days, assign, allocFn, ctx = {}) {
     const out = lines.map(l => ({ ...l, quantity: null, unitAmount: null, amount: 0, dayKeys: [] }));
     const byId = new Map(out.map(l => [l.id, l]));
     const timeLines = out.filter(l => l.kind === 'time');
@@ -314,6 +350,7 @@
       l.unitAmount = l.manualRate || (q ? round2(amt / q) : (days.find(d => d.rate)?.rate || 0));
       l.amount = round2(q * l.unitAmount);
     }
+    for (const l of out.filter(l => l.kind === 'mat')) { l.quantity = 1; l.unitAmount = round2(ctx.matTotal || 0); l.amount = l.unitAmount; }
     const veh = out.find(l => l.kind === 'vehicle');
     if (veh) {
       const kms = days.reduce((s, d) => s + d.kms, 0), amt = days.reduce((s, d) => s + d.kmAmt, 0);
@@ -405,7 +442,7 @@
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);

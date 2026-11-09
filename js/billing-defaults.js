@@ -38,11 +38,15 @@ window.GS_BILLING_DEFAULTS = {
     'HDC|*': { contact: 'Hastings District Council', reference: '', header: '', due: '20th' },
     'Arborlab|*': { contact: 'Arborlab Consultancy Services Limited', reference: '', header: '', due: '20th' },
     'Consulting|*': { contact: '', reference: '', header: '', due: '20th' },
-    'P Delmont|*': { contact: 'Peter Delmont', reference: 'Landscaping Services', header: '', due: '2' },
-    'Angie|*': { contact: 'Angie Bao', reference: 'Landscaping Services', header: '', due: '3' },
-    'Leathard|*': { contact: 'Vicki & Wayne Leathard', reference: 'Landscaping Services', header: '', due: '3' },
-    'Walters|*': { contact: 'Polly & Keith Walters', reference: 'Landscaping Services', header: '', due: '3' },
-    'Libby|*': { contact: 'Libby Lewis', reference: 'Landscaping Services', header: '', due: '3' }
+    'P Delmont|*': { contact: 'Peter Delmont', reference: 'Landscaping Services', header: '', due: '2' , schedule: 'land' },
+    'Angie|*': { contact: 'Angie Bao', reference: 'Landscaping Services', header: '', due: '3' , schedule: 'land' },
+    'Leathard|*': { contact: 'Vicki & Wayne Leathard', reference: 'Landscaping Services', header: '', due: '3' , schedule: 'land' },
+    'Walters|*': { contact: 'Polly & Keith Walters', reference: 'Landscaping Services', header: '', due: '3' , schedule: 'land' },
+    'Collective|*': { contact: 'Collective', reference: 'Landscaping Services', header: '', due: '3', schedule: 'land' },
+    'Frana|*': { contact: 'Frana', reference: 'Landscaping Services', header: '', due: '3', schedule: 'land' },
+    'J Delmont|*': { contact: 'J Delmont', reference: 'Landscaping Services', header: '', due: '3', schedule: 'land' },
+    'Kylie|*': { contact: 'Kylie', reference: 'Landscaping Services', header: '', due: '3', schedule: 'land' },
+    'Libby|*': { contact: 'Libby Lewis', reference: 'Landscaping Services', header: '', due: '3' , schedule: 'land' }
   }
 };
 
