@@ -242,6 +242,14 @@ body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { m
 .pdf-mode .sf-table th { white-space: normal; }
 @media print { .screen-only { display: none !important; } .sf-table { table-layout: auto; } .sf-table td.act-cell { width: 34%; min-width: 200px; } .print-only { display: inline !important; } .alloc-in, .trip-in { display: none !important; } .sf-table { min-width: 0; font-size: .72rem; } }
 
+/* editable schedule cells */
+.act-in { width: 100%; min-width: 16ch; font: inherit; font-size: .85rem; line-height: 1.35; padding: 4px 6px; resize: vertical; border: 1px solid transparent; background: transparent; }
+.act-in:hover { border-color: var(--line); }
+.act-in:focus { border-color: var(--accent); background: var(--surface); }
+.act-in.edited, .alloc-in.edited { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); background: color-mix(in srgb, var(--warn) 7%, var(--surface)); }
+.paper table:not(.sf-table) .alloc-in { width: 5em; }
+.pdf-mode .act-in { display: none; }
+
 /* materials */
 .mat-table input, .mat-table select { width: 100%; min-width: 4.5em; font-size: .85rem; padding: 5px 6px; }
 .mat-table td { white-space: nowrap; }
