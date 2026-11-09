@@ -650,6 +650,8 @@
     state.settings.alloc[allocKey(d)] = cur;
     saveSettings();
   }
+  const tripKey = d => state.inv.client + '|' + d.project + '|' + d.date;
+  function tripFor(d) { const t = (state.settings.trips || {})[tripKey(d)]; return t !== undefined ? t : d.kmNotes.join('; '); }
   function computeInv() {
     const inv = state.inv;
     if (inv.sf) {
@@ -703,7 +705,7 @@
       return `<tr>
         <td style="white-space:nowrap">${C.fmtDateNZ(d.date)}${a.suggested ? ' <span class="no-print guess" title="First guess from the activity text. Edit any cell to confirm.">&bull;</span>' : ''}</td>
         <td class="act-cell">${esc(d.activityText) || '-'}</td>
-        <td class="num">${hrs(d.hours)}</td>
+        <td class="num screen-only">${hrs(d.hours)}</td>
         ${cell(d, 'adj', a.adj)}${cell(d, 'visits', a.visits)}${cell(d, 'nv', a.nv, 1)}${cell(d, 'p27', a.p27)}${cell(d, 'admin', a.admin)}${cell(d, 'tech', a.tech)}
         <td class="num"><strong>${hrs(total)}</strong></td>
         <td class="num" style="color:${check ? '#b3412f' : '#2e7d4f'}">${check ? (check > 0 ? '+' : '') + hrs(check) : '0'}</td>
@@ -716,12 +718,12 @@
         ${guessed ? `<span class="chip warn">${guessed} day${guessed === 1 ? '' : 's'} using a first guess (&bull;)</span>` : ''}
         <span class="note">Adj Hours is what you bill. Split it across Visits, P27, Reporting-Admin and Technical Support; Check must be 0.</span></div>
       <div class="table-wrap"><table class="sf-table">
-        <colgroup><col class="c-date"><col class="c-act"><col class="c-n"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-n"><col class="c-n"></colgroup>
-        <thead><tr><th>Date</th><th>Activities</th><th class="num">Hours</th><th class="num">Adj Hours</th><th class="num">Visits</th><th class="num">No of Visits</th><th class="num">P27</th><th class="num">Reporting-Admin</th><th class="num">Technical Support</th><th class="num">Total</th><th class="num">Check</th></tr></thead>
+        <colgroup><col class="c-date"><col class="c-act"><col class="c-n screen-only"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-n"><col class="c-n"></colgroup>
+        <thead><tr><th>Date</th><th>Activities</th><th class="num screen-only">Hours</th><th class="num"><span class="screen-only">Adj Hours</span><span class="print-only">Total Hours</span></th><th class="num">Visits</th><th class="num">No of Visits</th><th class="num">P27</th><th class="num">Reporting-Admin</th><th class="num">Technical Support</th><th class="num">Total</th><th class="num">Check</th></tr></thead>
         <tbody>${rowsH || '<tr><td colspan="11" class="muted">No time in this period.</td></tr>'}</tbody>
         <tfoot>
-          <tr><td colspan="2">Total hours</td><td class="num">${hrs(tot.hours)}</td><td class="num">${hrs(tot.adj)}</td><td class="num">${hrs(tot.visits)}</td><td class="num">${tot.nv}</td><td class="num">${hrs(tot.p27)}</td><td class="num">${hrs(tot.admin)}</td><td class="num">${hrs(tot.tech)}</td><td class="num">${hrs(tot.total)}</td><td class="num" style="color:${tc ? '#b3412f' : '#2e7d4f'}">${tc ? hrs(tc) : '0'}</td></tr>
-          <tr class="sf-money"><td colspan="3">At ${money(rate)}/h</td><td class="num">${money(tot.adj * rate)}</td><td class="num">${money(tot.visits * rate)}</td><td></td><td class="num">${money(tot.p27 * rate)}</td><td class="num">${money(tot.admin * rate)}</td><td class="num">${money(tot.tech * rate)}</td><td class="num">${money(tot.total * rate)}</td><td></td></tr>
+          <tr><td colspan="2">Total hours</td><td class="num screen-only">${hrs(tot.hours)}</td><td class="num">${hrs(tot.adj)}</td><td class="num">${hrs(tot.visits)}</td><td class="num">${tot.nv}</td><td class="num">${hrs(tot.p27)}</td><td class="num">${hrs(tot.admin)}</td><td class="num">${hrs(tot.tech)}</td><td class="num">${hrs(tot.total)}</td><td class="num" style="color:${tc ? '#b3412f' : '#2e7d4f'}">${tc ? hrs(tc) : '0'}</td></tr>
+          <tr class="sf-money"><td colspan="2">At ${money(rate)}/h</td><td class="screen-only"></td><td class="num">${money(tot.adj * rate)}</td><td class="num">${money(tot.visits * rate)}</td><td></td><td class="num">${money(tot.p27 * rate)}</td><td class="num">${money(tot.admin * rate)}</td><td class="num">${money(tot.tech * rate)}</td><td class="num">${money(tot.total * rate)}</td><td></td></tr>
         </tfoot>
       </table></div>`;
   }
@@ -827,7 +829,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
 `}
               ${kmDays.length ? `<div class="doc-section"><h3>Vehicle</h3><div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Trip</th><th class="num">Km</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-                <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${esc(x.kmNotes.join('; ')) || '-'}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
+                <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${(() => { const tv = tripFor(x); return `<input type="text" class="trip-in no-print" data-trip="${esc(x.key)}" value="${esc(tv)}" aria-label="Trip ${C.fmtDateNZ(x.date)}"><span class="print-only">${esc(tv) || '-'}</span>`; })()}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total vehicle</td><td class="num">${kmDays.reduce((a, x) => a + x.kms, 0)}</td><td></td><td class="num">${money(kmDays.reduce((a, x) => a + x.kmAmt, 0))}</td></tr></tfoot>
               </table></div></div>` : ''}
               <div class="doc-totals">
@@ -901,6 +903,13 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
       rebuildInvoice(true); rerender();
     });
     $$('.line-sel', el).forEach(s => s.onchange = () => { inv.assign[s.dataset.day] = +s.value; rerender(); });
+    $$('[data-trip]', el).forEach(inp => inp.onchange = () => {
+      const d = inv.days.find(x => x.key === inp.dataset.trip); if (!d) return;
+      state.settings.trips = state.settings.trips || {};
+      state.settings.trips[tripKey(d)] = inp.value.trim();
+      saveSettings(); toast('Trip name saved');
+      const sp = inp.nextElementSibling; if (sp) sp.textContent = inp.value.trim() || '-';
+    });
     $('#iSF').onchange = e => { inv.sf = e.target.checked; rebuildInvoice(false); rerender(); };
     $$('[data-alloc]', el).forEach(inp => inp.onchange = () => {
       const d = inv.days.find(x => x.key === inp.dataset.alloc); if (!d) return;
@@ -970,12 +979,20 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
     return `Schedule ${m.number ? m.number + ' ' : ''}${m.contactName} ${C.MONTHS[+mo - 1]} ${y}.pdf`.replace(/[\\/:*?"<>|]/g, '');
   }
   function pdfWorker() {
-    const el = $('#scheduleDoc');
+    // Render from a fixed-width A4 copy so the on-screen layout and scroll position do not matter
+    const src = $('#scheduleDoc');
+    const wrap = document.createElement('div');
+    wrap.className = 'pdf-mode';
+    wrap.style.cssText = 'width:660px;background:#fff;';
+    const copy = src.cloneNode(true);
+    copy.removeAttribute('id');
+    wrap.appendChild(copy);
     return html2pdf().set({
       margin: [12, 12, 14, 12], filename: pdfName(), image: { type: 'jpeg', quality: 0.96 },
-      html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true, onclone: doc => { doc.body.classList.add('pdf-mode'); const p = doc.getElementById('scheduleDoc'); p.style.boxShadow = 'none'; p.style.border = '0'; p.style.width = '780px'; p.style.padding = '0'; } },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }, pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.doc-totals'] }
-    }).from(el);
+      html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true, scrollX: 0, scrollY: 0 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.doc-totals'] }
+    }).from(wrap);
   }
   async function downloadPDF() {
     if (!window.html2pdf) { toast('The PDF tool did not load. Use Print and choose Save as PDF instead.'); return; }
