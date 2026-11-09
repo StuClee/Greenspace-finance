@@ -197,6 +197,39 @@ tr.clickable { cursor: pointer; }
 .xero-status { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .result { font-size: .9rem; }
 
+/* time entry */
+.entry-form { border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent-soft) 35%, var(--surface)); border-radius: 6px; padding: 14px; display: grid; gap: 12px; }
+.ef-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 130px), 1fr)); gap: 10px 12px; align-items: end; }
+.ef-grid .ef-wide { grid-column: span 2; }
+@media (max-width: 480px) { .ef-grid .ef-wide { grid-column: 1 / -1; } }
+.ef-grid input, .ef-grid select { width: 100%; }
+.ef-hours { font-family: var(--f-display); font-weight: 650; font-size: 1.3rem; font-variant-numeric: tabular-nums; padding: 4px 0; }
+.row-actions { display: flex; gap: 4px; justify-content: flex-end; margin-top: 6px; }
+.row-actions .btn { padding: 4px 8px; font-size: .78rem; }
+
+/* sports field schedule */
+body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { max-width: 1680px; }
+.inv-layout.wide { grid-template-columns: minmax(0, 1fr); }
+.inv-layout.wide .inv-side { position: static; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
+.sf-note { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.sf-table { font-size: .82rem; table-layout: fixed; width: 100%; min-width: 940px; }
+.sf-table col.c-date { width: 92px; }
+.sf-table col.c-act { width: auto; }
+.sf-table col.c-n { width: 62px; }
+.sf-table col.c-in { width: 76px; }
+.sf-table th, .sf-table td { padding: 6px 5px; }
+.sf-table th { white-space: normal; line-height: 1.2; vertical-align: bottom; font-size: .66rem; letter-spacing: .04em; }
+.sf-table td.act-cell { overflow-wrap: anywhere; }
+.alloc-in { width: 100%; padding: 4px 6px; text-align: right; font-size: .85rem; -moz-appearance: textfield; }
+.alloc-in::-webkit-outer-spin-button, .alloc-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.paper.sf { padding: 28px 26px; }
+.sf-table .guess { color: var(--warn); font-weight: 700; }
+.sf-money td { font-weight: 600; color: #5d6a61; border-top: 0; }
+.print-only { display: none; }
+.pdf-mode .print-only { display: inline; }
+.pdf-mode .sf-table { min-width: 0; font-size: .74rem; }
+@media print { .print-only { display: inline !important; } .alloc-in { display: none !important; } .sf-table { min-width: 0; font-size: .72rem; } }
+
 /* setup */
 .setup-table input, .setup-table select { width: 100%; font-size: .85rem; padding: 5px 7px; }
 .setup-table td { padding: 4px 6px; }
