@@ -242,6 +242,15 @@ body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { m
 .pdf-mode .sf-table th { white-space: normal; }
 @media print { .screen-only { display: none !important; } .sf-table { table-layout: auto; } .sf-table td.act-cell { width: 34%; min-width: 200px; } .print-only { display: inline !important; } .alloc-in, .trip-in { display: none !important; } .sf-table { min-width: 0; font-size: .72rem; } }
 
+/* materials */
+.mat-table input, .mat-table select { width: 100%; min-width: 4.5em; font-size: .85rem; padding: 5px 6px; }
+.mat-table td { white-space: nowrap; }
+.mat-table td:nth-child(2) input { min-width: 14em; }
+.mat-table td:nth-child(3) input { min-width: 8em; }
+.mat-table td:nth-child(7) select { min-width: 10.5em; }
+.mat-table td:nth-child(1) input { min-width: 9.5em; }
+tr.mat-off td { opacity: .45; }
+
 /* setup */
 .setup-table input, .setup-table select { width: 100%; font-size: .85rem; padding: 5px 7px; }
 .setup-table td { padding: 4px 6px; }
