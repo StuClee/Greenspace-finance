@@ -10,32 +10,106 @@
   const hrs = n => (Math.round((n || 0) * 100) / 100).toLocaleString('en-NZ', { maximumFractionDigits: 2 });
   const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${C.pad(d.getMonth() + 1)}-${C.pad(d.getDate())}`; };
   const CAT_COLORS = { Consulting: 'var(--accent)', Landscaping: 'var(--soil)', Admin: 'var(--muted)', Travel: 'var(--warn)' };
+  const clone = o => JSON.parse(JSON.stringify(o));
 
-  // ---------- storage ----------
+  // ---------- browser storage (only used when the server database is not reachable) ----------
   const store = {
     get(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
     del(k) { try { localStorage.removeItem(k); } catch { } }
   };
 
-  const clone = o => JSON.parse(JSON.stringify(o));
-  function loadSettings() {
-    const d = clone(window.GS_BILLING_DEFAULTS);
-    const s = store.get('gs.settings', null);
-    const merged = Object.assign(d, s || {});
-    merged.projects = Object.assign(clone(window.GS_BILLING_DEFAULTS.projects), (s && s.projects) || {});
-    merged.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (s && s.contacts) || {});
-    merged.invoiced = (s && s.invoiced) || [];
-    merged.fromDate = (s && s.fromDate) || '2026-09-01';
-    return merged;
+  // ---------- database ----------
+  // Server mode: Netlify function /api/db (Netlify Blobs). Local mode: this browser only (preview / offline).
+  const db = {
+    mode: 'server',
+    async load() {
+      try {
+        const r = await fetch('/api/db', { headers: { accept: 'application/json' } });
+        if (!r.ok) throw new Error('db ' + r.status);
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('json')) throw new Error('not json');
+        this.mode = 'server';
+        return await r.json();
+      } catch {
+        this.mode = 'local';
+        const l = store.get('gs.db', null);
+        return { entries: (l && l.entries) || [], config: (l && l.config) || null, empty: !l };
+      }
+    },
+    async send(url, method, body) {
+      const r = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'Save failed (' + r.status + ')');
+      return j;
+    },
+    saveLocal() { store.set('gs.db', { entries: state.data.rows, config: state.config }); },
+    async saveDay(date, entries) {
+      if (this.mode === 'local') return this.saveLocal();
+      return this.send('/api/db?day=' + date, 'PUT', { entries });
+    },
+    async saveConfig(config) {
+      if (this.mode === 'local') return this.saveLocal();
+      return this.send('/api/db?config=1', 'PUT', { config });
+    },
+    async importAll(entries, config, from) {
+      if (this.mode === 'local') { state.data.rows = entries; return this.saveLocal(); }
+      return this.send('/api/db?import=1', 'POST', { entries, config, from });
+    }
+  };
+
+  function defaultConfig() {
+    const d = clone(window.GS_DEFAULT_CONFIG);
+    return { projects: d.projects, targets: d.targets, mileageRate: d.mileageRate, settings: defaultSettings() };
   }
-  const saveSettings = () => store.set('gs.settings', state.settings);
+  function defaultSettings() {
+    const d = clone(window.GS_BILLING_DEFAULTS);
+    d.invoiced = []; d.fromDate = '2026-09-01';
+    return d;
+  }
+  // Fill any missing pieces of a saved config from the defaults
+  function normaliseConfig(c) {
+    const d = defaultConfig();
+    if (!c) return d;
+    const s = Object.assign(defaultSettings(), c.settings || {});
+    s.projects = Object.assign(clone(window.GS_BILLING_DEFAULTS.projects), (c.settings && c.settings.projects) || {});
+    s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
+    s.invoiced = (c.settings && c.settings.invoiced) || [];
+    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, settings: s };
+  }
 
   const state = {
-    data: null, source: null, settings: loadSettings(), view: 'dashboard',
-    tsDate: null, tsMonth: null, dashMonth: null,
-    inv: null, xero: { checked: false, available: false, connected: false }, charts: {}
+    config: null, settings: null, data: null, view: 'dashboard',
+    tsDate: null, tsMonth: null, dashMonth: null, editing: null,
+    inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, saving: 0
   };
+
+  function applyConfig(cfg) {
+    state.config = normaliseConfig(cfg);
+    state.settings = state.config.settings;
+    if (state.data) { state.data.targets = state.config.targets; state.data.projects = state.config.projects; state.data.mileageRate = state.config.mileageRate; }
+  }
+  function setRows(rows) {
+    state.data = { rows: rows.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), targets: state.config.targets, projects: state.config.projects, mileageRate: state.config.mileageRate, fromDate: state.settings.fromDate };
+  }
+
+  // ---------- save status ----------
+  let cfgTimer;
+  function saveSettings() { clearTimeout(cfgTimer); cfgTimer = setTimeout(() => track(db.saveConfig(state.config)), 400); }
+  async function track(p) {
+    state.saving++; updateChip();
+    try { await p; state.lastSaved = new Date(); state.saveError = null; }
+    catch (e) { state.saveError = e.message; toast('Not saved: ' + e.message, 6000); }
+    finally { state.saving--; updateChip(); }
+  }
+  function updateChip() {
+    const chip = $('#dataChip');
+    if (state.saveError) { chip.textContent = 'Not saved, check connection'; chip.className = 'chip bad'; return; }
+    if (state.saving) { chip.textContent = 'Saving ...'; chip.className = 'chip'; return; }
+    if (db.mode === 'local') { chip.textContent = 'Saved in this browser only'; chip.className = 'chip warn'; chip.title = 'The app database is available once deployed to Netlify'; return; }
+    chip.textContent = state.lastSaved ? 'All changes saved' : 'Saved on your Netlify site';
+    chip.className = 'chip ok'; chip.title = '';
+  }
 
   // ---------- toast ----------
   let toastTimer;
@@ -44,59 +118,61 @@
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ms);
   }
 
-  // ---------- workbook loading ----------
-  async function loadFile(file) {
+  // ---------- one-off workbook import ----------
+  async function importWorkbook(file, from) {
     if (!file) return;
-    if (!window.XLSX) { toast('The spreadsheet reader did not load. Check your connection and reload the page.'); return; }
-    toast('Reading ' + file.name + ' ...', 8000);
+    if (!window.XLSX) { toast('The spreadsheet reader did not load. Check your connection and reload.'); return; }
+    toast('Reading ' + file.name + ' ...', 10000);
     try {
-      const buf = await file.arrayBuffer();
       const names = ['Timesheet', 'Config', 'Working Days'];
-      const wb = XLSX.read(buf, { type: 'array', sheets: names });
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', sheets: names });
       const sheets = {};
       for (const n of names) if (wb.Sheets[n]) sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null });
       if (!sheets.Timesheet) throw new Error('This workbook has no Timesheet tab.');
-      const data = C.parseWorkbook(sheets, { fromDate: state.settings.fromDate });
-      data.fileName = file.name; data.fileModified = file.lastModified ? new Date(file.lastModified).toISOString() : null;
-      setData(data, 'file');
-      if (!store.set('gs.data', data)) toast('Loaded, but this browser could not save it. You will need to load the workbook again next visit.', 5000);
-      else toast(`Loaded ${data.rows.length.toLocaleString()} timesheet entries from ${file.name}`);
-      if (data.warnings.length) console.warn(data.warnings);
-    } catch (e) {
-      console.error(e);
-      toast('Could not read the workbook: ' + e.message, 6000);
-    }
+      from = from || state.settings.fromDate || '2026-09-01';
+      const parsed = C.parseWorkbook(sheets, { fromDate: from });
+      const entries = C.rowsToEntries(parsed.rows);
+      // rates, mileage and targets from the workbook, keeping anything added in the app
+      const cfg = clone(state.config);
+      for (const p of parsed.projects) {
+        const rate = p.rateNew || p.rateOld || 0;
+        const ex = cfg.projects.find(x => x.client === p.client && x.project === p.project);
+        if (ex) ex.rate = rate; else cfg.projects.push({ client: p.client, project: p.project, rate });
+      }
+      if (parsed.mileageRate) cfg.mileageRate = parsed.mileageRate;
+      for (const [mk, t] of Object.entries(parsed.targets)) if (t.target) cfg.targets[mk] = { target: t.target, targetDays: t.targetDays || t.netDays || 21 };
+      cfg.settings.fromDate = from;
+      cfg.settings.importedAt = new Date().toISOString(); cfg.settings.importedFile = file.name;
+      toast('Saving ' + entries.length + ' entries ...', 10000);
+      await db.importAll(entries, cfg, from);
+      applyConfig(cfg);
+      if (db.mode === 'local') db.saveLocal();
+      // reload what the server now holds (keeps any entries before `from`)
+      const fresh = db.mode === 'server' ? await db.load() : { entries };
+      setRows(fresh.entries || entries);
+      state.firstRun = false; state.inv = null; state.tsDate = null; state.dashMonth = null; pickDates();
+      toast(`Imported ${entries.length} entries from ${file.name}. Everything now lives in the app.`, 5000);
+      go('dashboard');
+    } catch (e) { console.error(e); toast('Could not import the workbook: ' + e.message, 7000); }
   }
 
-  function setData(data, source) {
-    state.data = data; state.source = source;
-    const last = data.rows.length ? data.rows[data.rows.length - 1].date : todayISO();
-    const t = todayISO();
-    state.tsDate = state.tsDate || (last < t ? last : t);
-    state.dashMonth = state.dashMonth || C.monthKey(last < t ? last : t);
-    state.inv = null;
-    updateChip();
-    route();
+  function pickDates() {
+    const rows = state.data.rows; const t = todayISO();
+    const last = rows.length ? rows[rows.length - 1].date : t;
+    state.tsDate = state.tsDate || t;
+    state.dashMonth = state.dashMonth || C.monthKey(t);
   }
 
-  function updateChip() {
-    const chip = $('#dataChip');
-    if (!state.data) { chip.textContent = 'No workbook loaded'; chip.className = 'chip warn'; return; }
-    const d = state.data;
-    const last = d.rows.length ? d.rows[d.rows.length - 1].date : null;
-    const src = state.source === 'snapshot' ? 'Snapshot of 2 Nov workbook' : (d.fileName || 'Workbook');
-    chip.textContent = `${src} · entries to ${last ? C.fmtDateLong(last) : 'none'}`;
-    chip.className = 'chip ' + (state.source === 'snapshot' ? 'warn' : 'ok');
-    chip.title = 'Loaded ' + new Date(d.loadedAt).toLocaleString('en-NZ');
-  }
-
-  // drag & drop anywhere
-  let dragDepth = 0;
-  window.addEventListener('dragenter', e => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { dragDepth++; document.body.classList.add('dragging'); } });
-  window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove('dragging'); });
+  // drag & drop a workbook anywhere on the Setup page or the welcome screen
   window.addEventListener('dragover', e => e.preventDefault());
-  window.addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging'); const f = e.dataTransfer?.files?.[0]; if (f) loadFile(f); });
-  $('#fileInput').addEventListener('change', e => { loadFile(e.target.files[0]); e.target.value = ''; });
+  window.addEventListener('drop', e => {
+    e.preventDefault();
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    if (state.view === 'setup' || state.firstRun) importWorkbook(f, $('#impFrom')?.value);
+    else toast('To import a workbook, go to Setup.');
+  });
+  $('#fileInput').addEventListener('change', e => { importWorkbook(e.target.files[0], $('#impFrom')?.value); e.target.value = ''; });
 
   // ---------- routing ----------
   const VIEWS = ['dashboard', 'timesheet', 'invoicing', 'setup'];
@@ -105,12 +181,34 @@
     state.view = VIEWS.includes(h) ? h : 'dashboard';
     $$('.tabs a').forEach(a => a.setAttribute('aria-current', a.dataset.view === state.view ? 'page' : 'false'));
     $$('.view').forEach(v => { v.hidden = true; });
-    if (!state.data && state.view !== 'setup') { $('#view-empty').hidden = false; return; }
+    if (!state.data) { $('#view-loading').hidden = false; return; }
+    if (state.firstRun && state.view !== 'setup') { renderWelcome($('#view-empty')); $('#view-empty').hidden = false; return; }
     const el = $('#view-' + state.view); el.hidden = false;
     ({ dashboard: renderDashboard, timesheet: renderTimesheet, invoicing: renderInvoicing, setup: renderSetup })[state.view](el);
   }
   window.addEventListener('hashchange', route);
   const go = v => { if (location.hash === '#' + v) route(); else location.hash = v; };
+
+  function renderWelcome(el) {
+    el.innerHTML = `
+      <div class="dropzone">
+        <h1>Welcome to Greenspace Finance</h1>
+        <p>Your timesheet, rates, targets and billing details are kept in this app from now on. Bring your existing history across once from the workbook, or start with an empty timesheet.</p>
+        <div class="add-lines" style="justify-content:center">
+          <label class="field"><span>Bring entries across from</span><input type="date" id="impFrom" value="${esc(state.settings.fromDate || '2026-09-01')}"></label>
+        </div>
+        <div class="add-lines" style="justify-content:center">
+          <label class="btn" for="fileInput">Import 2026 Financials workbook (one time)</label>
+          <button class="btn btn-quiet" id="startEmpty">Start with an empty timesheet</button>
+        </div>
+        <p class="note">Only the Timesheet, Config and Working Days tabs are read. You can drop the workbook onto this page too.</p>
+      </div>`;
+    $('#startEmpty').onclick = async () => {
+      state.firstRun = false;
+      await track(db.saveConfig(state.config));
+      go('timesheet');
+    };
+  }
 
   // ---------- helpers ----------
   const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -123,13 +221,17 @@
     const t = state.data.targets[mk];
     return t && t.target ? t.target / (t.targetDays || 21) : 0;
   }
+  function allMonths() {
+    const ms = new Set(C.monthsInData(state.data)); ms.add(C.monthKey(todayISO()));
+    return [...ms].sort();
+  }
 
   // ======================================================================
   // DASHBOARD
   // ======================================================================
   function renderDashboard(el) {
     const d = state.data;
-    const months = C.monthsInData(d);
+    const months = allMonths();
     const t = todayISO();
     if (!months.includes(state.dashMonth)) state.dashMonth = months[months.length - 1];
     const mk = state.dashMonth;
@@ -307,49 +409,86 @@
   }
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (state.view === 'dashboard' && state.data) route(); });
 
+
   // ======================================================================
-  // TIMESHEET
+  // TIMESHEET (enter and edit time)
   // ======================================================================
+  function clientsList() { return [...new Set(state.config.projects.map(p => p.client))].sort((a, b) => a.localeCompare(b)); }
+  function projectsFor(client) { return state.config.projects.filter(p => p.client === client).map(p => p.project); }
+
+  function entryFormHTML(e, isNew) {
+    const clients = clientsList();
+    const client = e.client || clients[0] || '';
+    const projects = projectsFor(client);
+    const hours = Math.max(0, Math.round((C.toMin(e.end) - C.toMin(e.time)) / 15) / 4);
+    return `<form class="entry-form" id="entryForm" data-id="${esc(e.id || '')}" autocomplete="off">
+      <div class="ef-grid">
+        <label class="field"><span>Start</span><input type="time" step="900" id="fStart" value="${esc(e.time)}" required></label>
+        <label class="field"><span>End</span><input type="time" step="900" id="fEnd" value="${esc(e.end)}" required></label>
+        <div class="field"><span>Hours</span><output id="fHours" class="ef-hours">${hrs(hours)}</output></div>
+        <label class="field"><span>Client</span><select id="fClient">${clients.map(c => `<option ${c === client ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+        <label class="field"><span>Project</span><select id="fProject">${projects.map(p => `<option ${p === e.project ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
+        <label class="field ef-wide"><span>Activity</span><input type="text" id="fActivity" value="${esc(e.activity)}" placeholder="What you did, e.g. Site visit Puhoi; call Scott"></label>
+        <label class="field"><span>Km</span><input type="number" min="0" step="1" id="fKms" value="${e.kms || ''}" placeholder="0"></label>
+        <label class="field ef-wide"><span>Notes (not on invoices)</span><input type="text" id="fNotes" value="${esc(e.notes)}"></label>
+      </div>
+      <div class="add-lines">
+        <button class="btn" type="submit">${isNew ? 'Add entry' : 'Save changes'}</button>
+        <button class="btn btn-quiet" type="button" id="fCancel">Cancel</button>
+        <span class="note" id="fRate"></span>
+      </div>
+    </form>`;
+  }
+
   function renderTimesheet(el) {
     const d = state.data;
-    const date = state.tsDate;
+    const date = state.tsDate || todayISO();
     const mk = C.monthKey(date);
-    const { blocks, kmRows } = C.dayBlocks(d.rows, date);
-    const dayRev = blocks.reduce((a, b) => a + b.amount, 0);
-    const dayHrs = blocks.reduce((a, b) => a + b.hours, 0);
+    const entries = d.rows.filter(r => r.date === date).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    const work = entries.filter(r => r.client);
+    const dayRev = work.reduce((a, b) => a + b.amount, 0);
+    const dayHrs = work.reduce((a, b) => a + b.hours, 0);
     const perDay = monthTargetPerDay(mk);
     const isWeekend = C.weekday(date) % 6 === 0;
-    const cats = {}; blocks.forEach(b => { cats[b.category] = (cats[b.category] || 0) + b.hours; });
+    const cats = {}; work.forEach(b => { cats[b.category] = (cats[b.category] || 0) + b.hours; });
+    const kmRows = entries.filter(r => r.kms);
     const kms = kmRows.reduce((a, r) => a + r.kms, 0), kmAmt = kmRows.reduce((a, r) => a + r.kmAmt, 0);
 
-    // week strip (Mon to Sun)
     const wd = C.weekday(date); const mon = C.addDays(date, -((wd + 6) % 7));
     const week = Array.from({ length: 7 }, (_, i) => C.addDays(mon, i)).map(x => ({ date: x, hours: d.rows.filter(r => r.date === x && r.client).reduce((a, r) => a + r.hours, 0) }));
     const maxH = Math.max(10, ...week.map(w => w.hours));
 
-    // timeline with gaps
+    // new-entry defaults: continue from the last entry
+    const lastE = entries[entries.length - 1];
+    const recent = d.rows.length ? d.rows[d.rows.length - 1] : null;
+    const startT = lastE ? lastE.end : '08:00';
+    const newE = { time: startT, end: C.timeAdd(startT, 60), client: (lastE || recent || {}).client || 'AC', project: (lastE || recent || {}).project || 'SF', activity: '', kms: 0, notes: '' };
+
     let tl = '';
-    blocks.forEach((b, i) => {
-      if (i && blocks[i - 1].end < b.start) tl += `<div class="gap">Break ${blocks[i - 1].end} to ${b.start}</div>`;
+    entries.forEach((b, i) => {
+      if (i && entries[i - 1].end < b.time) tl += `<div class="gap">Break ${entries[i - 1].end} to ${b.time}</div>`;
+      if (state.editing === b.id) { tl += entryFormHTML(b, false); return; }
       tl += `<div class="block" style="--c:${CAT_COLORS[b.category] || 'var(--accent)'}">
-        <div class="t">${b.start} - ${b.end}</div>
-        <div><div class="who">${esc(b.client)} <span class="muted" style="font-weight:400">· ${esc(b.project)}</span></div><div class="act">${esc(b.activity) || '<span class="muted">No activity noted</span>'}${b.notes ? ` · <em>${esc(b.notes)}</em>` : ''}</div></div>
-        <div class="amt"><div><strong>${hrs(b.hours)} h</strong></div><div class="muted">${b.amount ? money(b.amount) : 'non-billable'}</div></div>
+        <div class="t">${esc(b.time)} - ${esc(b.end)}</div>
+        <div><div class="who">${esc(b.client)} <span class="muted" style="font-weight:400">· ${esc(b.project)}</span></div>
+          <div class="act">${esc(b.activity) || '<span class="muted">No activity noted</span>'}${b.notes ? ` · <em>${esc(b.notes)}</em>` : ''}${b.kms ? ` · ${b.kms} km` : ''}</div></div>
+        <div class="amt"><div><strong>${hrs(b.hours)} h</strong></div><div class="muted">${b.amount ? money(b.amount) : 'non-billable'}</div>
+          <div class="row-actions"><button class="btn btn-small btn-quiet" data-edit="${esc(b.id)}">Edit</button><button class="btn btn-small btn-danger" data-delete="${esc(b.id)}" aria-label="Delete entry">Delete</button></div></div>
       </div>`;
     });
+    const adding = state.editing === 'new';
 
-    // month list
-    const monthRows = d.rows.filter(r => C.monthKey(r.date) === (state.tsMonth || mk));
+    const tm = state.tsMonth || mk;
+    const monthRows = d.rows.filter(r => C.monthKey(r.date) === tm);
     const byDate = new Map();
     for (const r of monthRows) {
-      if (!byDate.has(r.date)) byDate.set(r.date, { date: r.date, hours: 0, amount: 0, kms: 0, cats: {}, clients: new Map() });
+      if (!byDate.has(r.date)) byDate.set(r.date, { date: r.date, hours: 0, amount: 0, kms: 0, clients: new Map() });
       const x = byDate.get(r.date);
-      if (r.client) { x.hours += r.hours; x.amount += r.amount; x.cats[r.category] = (x.cats[r.category] || 0) + r.hours; x.clients.set(r.client, (x.clients.get(r.client) || 0) + r.hours); }
-      x.kms += r.kms;
+      if (r.client) { x.hours += r.hours; x.amount += r.amount; x.clients.set(r.client, (x.clients.get(r.client) || 0) + r.hours); }
+      x.kms += r.kms || 0;
     }
     const days = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date));
-    const tm = state.tsMonth || mk;
-    const months = C.monthsInData(d);
+    const months = allMonths();
 
     el.innerHTML = `
       <div class="view-head">
@@ -381,8 +520,9 @@
       </div>
 
       <div class="panel">
-        <div class="panel-head"><h2>Day</h2><span class="note">15-minute entries from the Timesheet tab, joined into blocks</span></div>
-        <div class="timeline">${tl || `<p class="muted">Nothing recorded for ${C.fmtDateLong(date)}.</p>`}</div>
+        <div class="panel-head"><h2>Day</h2>${adding ? '' : '<button class="btn" id="addEntry">+ Add time</button>'}</div>
+        <div class="timeline">${tl || (adding ? '' : `<p class="muted">Nothing recorded for ${C.fmtDateLong(date)} yet. Use <strong>Add time</strong> to start.</p>`)}
+          ${adding ? entryFormHTML(newE, true) : ''}</div>
       </div>
 
       <div class="panel">
@@ -403,14 +543,75 @@
         </table></div>
       </div>`;
 
-    const setDate = x => { if (!x) return; state.tsDate = x; state.tsMonth = null; renderTimesheet(el); };
+    const rerender = () => renderTimesheet(el);
+    const setDate = x => { if (!x) return; state.tsDate = x; state.tsMonth = null; state.editing = null; rerender(); };
     $('#tPrev').onclick = () => setDate(C.addDays(date, -1));
     $('#tNext').onclick = () => setDate(C.addDays(date, 1));
     $('#tToday').onclick = () => setDate(todayISO());
     $('#tDate').onchange = e => setDate(e.target.value);
-    $('#tMonth').onchange = e => { state.tsMonth = e.target.value; renderTimesheet(el); };
+    $('#tMonth').onchange = e => { state.tsMonth = e.target.value; rerender(); };
     $$('.week button', el).forEach(b => b.onclick = () => setDate(b.dataset.date));
     $$('tr[data-date]', el).forEach(tr => { tr.onclick = () => { setDate(tr.dataset.date); window.scrollTo({ top: 0 }); }; tr.onkeydown = e => { if (e.key === 'Enter') tr.click(); }; });
+    $('#addEntry')?.addEventListener('click', () => { state.editing = 'new'; rerender(); $('#fActivity')?.focus(); });
+    $$('[data-edit]', el).forEach(b => b.onclick = () => { state.editing = b.dataset.edit; rerender(); $('#fActivity')?.focus(); });
+    $$('[data-delete]', el).forEach(b => b.onclick = () => askDelete(b, date, rerender));
+    wireEntryForm(el, date, rerender);
+  }
+
+  // Inline confirm (the page cannot use confirm dialogs)
+  function askDelete(btn, date, rerender) {
+    if (btn.dataset.armed) {
+      const id = btn.dataset.delete;
+      state.data.rows = state.data.rows.filter(r => r.id !== id);
+      saveDay(date); rerender(); toast('Entry deleted');
+      return;
+    }
+    btn.dataset.armed = '1'; btn.textContent = 'Confirm delete';
+    setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.textContent = 'Delete'; } }, 4000);
+  }
+
+  function saveDay(date) {
+    const dayEntries = state.data.rows.filter(r => r.date === date);
+    state.inv = null;
+    return track(db.saveDay(date, dayEntries));
+  }
+
+  function wireEntryForm(el, date, rerender) {
+    const f = $('#entryForm', el); if (!f) return;
+    const id = f.dataset.id;
+    const prev = id ? state.data.rows.find(r => r.id === id) : null;
+    const showRate = () => {
+      const c = $('#fClient').value, p = $('#fProject').value;
+      const rate = prev && prev.client === c && prev.project === p ? prev.rate : C.rateFor(state.config, c, p);
+      const mins = C.toMin($('#fEnd').value) - C.toMin($('#fStart').value);
+      const h = Math.max(0, Math.round(mins / 15) / 4);
+      $('#fHours').textContent = hrs(h);
+      $('#fRate').textContent = rate ? `${money(rate)}/h · ${money(h * rate)}` : 'Non-billable';
+    };
+    $('#fClient').onchange = () => {
+      const ps = projectsFor($('#fClient').value);
+      $('#fProject').innerHTML = ps.map(p => `<option>${esc(p)}</option>`).join('');
+      showRate();
+    };
+    $('#fProject').onchange = showRate;
+    $('#fStart').onchange = () => { if (C.toMin($('#fEnd').value) <= C.toMin($('#fStart').value)) $('#fEnd').value = C.timeAdd($('#fStart').value, 60); showRate(); };
+    $('#fEnd').onchange = showRate;
+    $('#fCancel').onclick = () => { state.editing = null; rerender(); };
+    showRate();
+    f.onsubmit = e => {
+      e.preventDefault();
+      const vals = { date, time: $('#fStart').value, end: $('#fEnd').value, client: $('#fClient').value, project: $('#fProject').value, activity: $('#fActivity').value, kms: $('#fKms').value, notes: $('#fNotes').value };
+      if (!vals.time || !vals.end || C.toMin(vals.end) <= C.toMin(vals.time)) { toast('End time must be after the start time.'); return; }
+      if (!vals.client || !vals.project) { toast('Choose a client and project. Add new ones on the Setup page.'); return; }
+      const entry = C.makeEntry(vals, state.config, prev);
+      if (prev) state.data.rows = state.data.rows.map(r => r.id === prev.id ? entry : r);
+      else state.data.rows.push(entry);
+      state.data.rows.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      state.editing = prev ? null : 'new';
+      saveDay(date); rerender();
+      if (!prev) $('#fActivity')?.focus();
+      toast(prev ? 'Entry updated' : `Added ${hrs(entry.hours)} h ${entry.client} ${entry.project}`);
+    };
   }
 
   // ======================================================================
@@ -463,7 +664,7 @@
 
   function renderInvoicing(el) {
     const t = todayISO();
-    const months = C.monthsInData(state.data);
+    const months = allMonths();
     if (!state.inv) {
       const prev = C.addMonths(C.monthKey(t), -1);
       const mk = months.includes(prev) ? prev : months[months.length - 1];
@@ -761,81 +962,153 @@
     } finally { btn.disabled = false; btn.textContent = 'Create draft in Xero'; }
   }
 
+
   // ======================================================================
   // SETUP
   // ======================================================================
   function renderSetup(el) {
-    const s = state.settings;
+    const s = state.settings, cfg = state.config;
     const used = new Map();
-    if (state.data) for (const r of state.data.rows) if (r.client && isBillable(r.client)) used.set(r.client + '|' + r.project, (used.get(r.client + '|' + r.project) || 0) + r.hours);
-    const keys = [...new Set([...Object.keys(s.projects), ...used.keys()])].sort();
+    for (const r of state.data.rows) if (r.client) used.set(r.client + '|' + r.project, (used.get(r.client + '|' + r.project) || 0) + r.hours);
+    const billKeys = [...new Set([...Object.keys(s.projects), ...[...used.keys()].filter(k => isBillable(k.split('|')[0]))])].sort();
     const contacts = Object.keys(s.contacts).sort();
+    const projects = cfg.projects.slice().sort((a, b) => (a.client + a.project).localeCompare(b.client + b.project));
+    const t = todayISO();
+    const tMonths = []; for (let m = C.monthKey(s.fromDate || '2026-09-01'); m <= C.addMonths(C.monthKey(t), 12); m = C.addMonths(m, 1)) tMonths.push(m);
+
     el.innerHTML = `
-      <div class="view-head"><div><div class="label">Setup</div><h1>Billing and data</h1></div></div>
+      <div class="view-head"><div><div class="label">Setup</div><h1>Rates, targets and billing</h1></div></div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Clients, projects and rates</h2><span class="note">Rate per hour, excl GST. Changing a rate applies to new entries.</span></div>
+          <div class="table-wrap" style="max-height:520px;overflow:auto"><table class="setup-table">
+            <thead><tr><th>Client</th><th>Project</th><th class="num">Rate $/h</th><th class="num">Hours</th><th></th></tr></thead>
+            <tbody>${projects.map(p => { const i = cfg.projects.indexOf(p); return `<tr>
+              <td class="key">${esc(p.client)}</td><td>${esc(p.project)}</td>
+              <td><input type="number" min="0" step="0.5" data-rate-i="${i}" value="${p.rate}" aria-label="Rate for ${esc(p.client + ' ' + p.project)}" style="text-align:right"></td>
+              <td class="num muted">${used.has(p.client + '|' + p.project) ? hrs(used.get(p.client + '|' + p.project)) : ''}</td>
+              <td>${used.has(p.client + '|' + p.project) ? '' : `<button class="btn btn-danger btn-small" data-rm-i="${i}" aria-label="Remove ${esc(p.client + ' ' + p.project)}">Remove</button>`}</td></tr>`; }).join('')}</tbody>
+          </table></div>
+          <form id="addProj" class="add-lines" style="align-items:end">
+            <label class="field"><span>Client code</span><input type="text" id="npClient" list="clientCodes" required style="width:9em"></label>
+            <label class="field"><span>Project</span><input type="text" id="npProject" required style="width:12em"></label>
+            <label class="field"><span>Rate</span><input type="number" id="npRate" min="0" step="0.5" value="150" style="width:6em"></label>
+            <button class="btn btn-small" type="submit">Add project</button>
+          </form>
+          <datalist id="clientCodes">${clientsList().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Monthly targets</h2><span class="note">Used on the Dashboard and the daily target</span></div>
+          <div class="table-wrap" style="max-height:520px;overflow:auto"><table class="setup-table">
+            <thead><tr><th>Month</th><th class="num">Target $</th><th class="num">Working days</th><th class="num">$ per day</th></tr></thead>
+            <tbody>${tMonths.map(m => { const x = cfg.targets[m] || {}; return `<tr>
+              <td class="key">${C.monthLabel(m)}</td>
+              <td><input type="number" min="0" step="100" data-tg="${m}" data-f="target" value="${x.target ?? ''}" style="text-align:right" aria-label="Target for ${C.monthLabel(m)}"></td>
+              <td><input type="number" min="0" step="1" data-tg="${m}" data-f="targetDays" value="${x.targetDays ?? ''}" style="text-align:right" aria-label="Working days in ${C.monthLabel(m)}"></td>
+              <td class="num muted">${x.target && x.targetDays ? money0(x.target / x.targetDays) : ''}</td></tr>`; }).join('')}</tbody>
+          </table></div>
+          <label class="field" style="margin-top:12px;max-width:220px"><span>Mileage rate $/km</span><input type="number" min="0" step="0.01" id="sMileage" value="${cfg.mileageRate}"></label>
+        </div>
+      </div>
+
       <div class="panel">
-        <div class="panel-head"><h2>Who each project is billed to</h2><span class="note">Used to fill the draft invoice. "Client|*" covers every project for that client. Use {month} in a heading to insert the invoice month.</span></div>
+        <div class="panel-head"><h2>Who each project is billed to</h2><span class="note">Fills the draft invoice. "Client|*" covers every project for that client. Use {month} in a heading to insert the invoice month.</span></div>
         <div class="table-wrap"><table class="setup-table">
-          <thead><tr><th>Client | Project</th><th>Xero contact</th><th>Reference / PO</th><th>Invoice heading</th><th>Due</th><th class="num">Hours</th></tr></thead>
-          <tbody>${keys.map(k => { const p = s.projects[k] || { contact: '', reference: '', header: '', due: '20th' }; return `<tr data-key="${esc(k)}">
+          <thead><tr><th>Client | Project</th><th>Xero contact</th><th>Reference / PO</th><th>Invoice heading</th><th>Due</th></tr></thead>
+          <tbody>${billKeys.map(k => { const p = s.projects[k] || { contact: '', reference: '', header: '', due: '20th' }; return `<tr data-key="${esc(k)}">
             <td class="key">${esc(k.replace('|', ' | '))}${p.check ? ' <span class="chip warn">check</span>' : ''}</td>
             <td><input type="text" data-f="contact" value="${esc(p.contact)}" list="contactList2" aria-label="Xero contact for ${esc(k)}"></td>
             <td><input type="text" data-f="reference" value="${esc(p.reference)}" aria-label="Reference for ${esc(k)}"></td>
             <td><input type="text" data-f="header" value="${esc(p.header)}" aria-label="Heading for ${esc(k)}"></td>
-            <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, t]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
-            <td class="num muted">${used.has(k) ? hrs(used.get(k)) : ''}</td></tr>`; }).join('')}</tbody>
+            <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, tx]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${tx}</option>`).join('')}</select></td></tr>`; }).join('')}</tbody>
         </table></div>
         <datalist id="contactList2">${contacts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       </div>
 
       <div class="grid-2">
-        <div class="panel" style="display:grid;gap:12px">
+        <div class="panel" style="display:grid;gap:12px;align-content:start">
           <h2>Invoice defaults</h2>
           <label class="field"><span>Consultant name on invoice lines</span><input type="text" id="sConsultant" value="${esc(s.consultant)}"></label>
           <label class="field"><span>Next invoice number</span><input type="text" id="sNext" value="${esc(s.nextInvoiceNumber)}"></label>
           <label class="field"><span>Sales account code</span><input type="text" id="sAcct" value="${esc(s.accountCode)}"></label>
           <label class="field"><span>Not invoiced (internal time), comma separated</span><input type="text" id="sNonBill" value="${esc(s.nonBillable.join(', '))}"></label>
-          <label class="field"><span>Read timesheet entries from</span><input type="date" id="sFrom" value="${esc(s.fromDate)}"></label>
-          <p class="note">Changing the start date takes effect next time you load the workbook.</p>
-        </div>
-        <div class="panel" style="display:grid;gap:12px;align-content:start">
-          <h2>Xero contacts</h2>
-          <p class="note">Contact IDs let the app attach invoices to the exact Xero contact. Names without an ID are matched by name.</p>
+          <h3 style="margin-top:6px">Xero contacts</h3>
           <div class="table-wrap"><table><thead><tr><th>Name</th><th>Contact ID</th></tr></thead>
             <tbody>${contacts.map(c => `<tr><td>${esc(c)}</td><td class="mono" style="font-size:.75rem">${esc(s.contacts[c])}</td></tr>`).join('')}</tbody></table></div>
-          <h2 style="margin-top:8px">Saved in this browser</h2>
-          <p class="note">${state.data ? `Workbook data: ${state.data.rows.length.toLocaleString()} entries from ${esc(state.data.fileName || 'snapshot')}.` : 'No workbook data saved.'} ${s.invoiced.length} invoice records.</p>
+        </div>
+        <div class="panel" style="display:grid;gap:12px;align-content:start">
+          <h2>Your data</h2>
+          <p class="note">${state.data.rows.length.toLocaleString()} timesheet entries${state.data.rows.length ? `, ${C.fmtDateLong(state.data.rows[0].date)} to ${C.fmtDateLong(state.data.rows[state.data.rows.length - 1].date)}` : ''}. ${db.mode === 'server' ? 'Stored on your Netlify site.' : 'Stored in this browser only (the database works once the app runs on Netlify).'}${s.importedFile ? ` Imported from ${esc(s.importedFile)} on ${new Date(s.importedAt).toLocaleDateString('en-NZ')}.` : ''}</p>
           <div class="add-lines">
-            <button class="btn btn-small btn-quiet" id="sExport">Export settings</button>
-            <label class="btn btn-small btn-quiet" for="sImport">Import settings</label><input type="file" id="sImport" accept=".json" hidden>
-            <button class="btn btn-small btn-quiet" id="sClearData">Forget workbook data</button>
+            <button class="btn btn-small" id="xlsxBtn">Download timesheet (Excel)</button>
+            <button class="btn btn-small btn-quiet" id="backupBtn">Download full backup</button>
+          </div>
+          <h3 style="margin-top:6px">Import from the workbook</h3>
+          <p class="note">Replaces app entries from the chosen date onward with the workbook's Timesheet. Entries before that date are kept, and a backup is saved first. Use this once to bring your history across.</p>
+          <div class="add-lines" style="align-items:end">
+            <label class="field"><span>Replace entries from</span><input type="date" id="impFrom" value="${esc(s.fromDate || '2026-09-01')}"></label>
+            <label class="btn btn-small btn-quiet" for="fileInput">Choose workbook</label>
           </div>
         </div>
       </div>`;
 
+    const saved = () => { state.inv = null; saveSettings(); };
+    $$('[data-rate-i]', el).forEach(inp => inp.onchange = () => { cfg.projects[+inp.dataset.rateI].rate = +inp.value || 0; saved(); toast('Rate saved'); });
+    $$('[data-rm-i]', el).forEach(b => b.onclick = () => { cfg.projects.splice(+b.dataset.rmI, 1); saved(); renderSetup(el); toast('Project removed'); });
+    $('#addProj').onsubmit = e => {
+      e.preventDefault();
+      const client = $('#npClient').value.trim(), project = $('#npProject').value.trim();
+      if (!client || !project) return;
+      if (cfg.projects.some(p => p.client === client && p.project === project)) { toast('That project already exists.'); return; }
+      cfg.projects.push({ client, project, rate: +$('#npRate').value || 0 });
+      saved(); renderSetup(el); toast(`Added ${client} | ${project}`);
+    };
+    $$('[data-tg]', el).forEach(inp => inp.onchange = () => {
+      const m = inp.dataset.tg; cfg.targets[m] = Object.assign({ target: 0, targetDays: 21 }, cfg.targets[m]);
+      cfg.targets[m][inp.dataset.f] = +inp.value || 0; saved(); renderSetup(el);
+    });
+    $('#sMileage').onchange = e => { cfg.mileageRate = +e.target.value || 0.8; state.data.mileageRate = cfg.mileageRate; saved(); toast('Saved'); };
     $$('tr[data-key] [data-f]', el).forEach(inp => inp.onchange = () => {
       const k = inp.closest('tr').dataset.key;
       const p = s.projects[k] = Object.assign({ contact: '', reference: '', header: '', due: '20th' }, s.projects[k]);
       p[inp.dataset.f] = inp.value.trim(); delete p.check;
-      saveSettings(); state.inv = null; toast('Saved');
+      saved(); toast('Saved');
     });
-    const bind = (id, fn) => { $(id).onchange = e => { fn(e.target.value.trim()); saveSettings(); state.inv = null; toast('Saved'); }; };
+    const bind = (id, fn) => { $(id).onchange = e => { fn(e.target.value.trim()); saved(); toast('Saved'); }; };
     bind('#sConsultant', v => s.consultant = v);
     bind('#sNext', v => s.nextInvoiceNumber = v);
     bind('#sAcct', v => s.accountCode = v || '200');
     bind('#sNonBill', v => s.nonBillable = v.split(',').map(x => x.trim()).filter(Boolean));
-    bind('#sFrom', v => s.fromDate = v || '2026-09-01');
-    $('#sExport').onclick = () => downloadBlob(new Blob([JSON.stringify(s, null, 2)], { type: 'application/json' }), 'greenspace-finance-settings.json');
-    $('#sImport').onchange = async e => {
-      try { const j = JSON.parse(await e.target.files[0].text()); store.set('gs.settings', j); state.settings = loadSettings(); toast('Settings imported'); renderSetup(el); }
-      catch (err) { toast('That file is not a settings export: ' + err.message); }
-    };
-    $('#sClearData').onclick = () => { store.del('gs.data'); state.data = null; updateChip(); toast('Workbook data removed from this browser'); };
+    $('#xlsxBtn').onclick = exportExcel;
+    $('#backupBtn').onclick = () => downloadBlob(new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), entries: state.data.rows, config: state.config }, null, 1)], { type: 'application/json' }), `Greenspace Finance backup ${todayISO()}.json`);
+  }
+
+  function exportExcel() {
+    if (!window.XLSX) { toast('The spreadsheet tool did not load.'); return; }
+    const rows = state.data.rows.map(r => ({ Date: r.date, Start: r.time, End: r.end, Client: r.client, Project: r.project, Activity: r.activity, Hours: r.hours, Rate: r.rate, Amount: r.amount, Kms: r.kms || '', 'Km $': r.kmAmt || '', Category: r.category, Notes: r.notes }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Timesheet');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(state.config.projects.map(p => ({ Client: p.client, Project: p.project, Rate: p.rate }))), 'Rates');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Object.entries(state.config.targets).sort().map(([m, x]) => ({ Month: m, Target: x.target, 'Working days': x.targetDays }))), 'Targets');
+    XLSX.writeFile(wb, `Greenspace timesheet ${todayISO()}.xlsx`);
   }
 
   // ---------- boot ----------
-  const saved = store.get('gs.data', null);
-  if (saved && saved.rows) setData(saved, 'file');
-  else if (window.GS_SNAPSHOT) setData(window.GS_SNAPSHOT, 'snapshot');
-  else { updateChip(); route(); }
-  checkXero();
+  (async function boot() {
+    route();
+    const res = await db.load();
+    // carry over settings saved by the earlier browser-only version
+    let cfg = res.config;
+    const oldSettings = store.get('gs.settings', null);
+    if (!cfg && oldSettings) cfg = { settings: oldSettings };
+    applyConfig(cfg);
+    setRows(res.entries || []);
+    state.firstRun = !!res.empty && !(res.entries || []).length;
+    pickDates();
+    updateChip();
+    route();
+    checkXero();
+  })();
 })();
