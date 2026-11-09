@@ -23,8 +23,8 @@ window.GS_BILLING_DEFAULTS = {
   },
   // key "Client|Project" (or "Client|*" for every project of that client)
   projects: {
-    'AC|SF': { contact: 'Auckland Council', reference: '6500136549', header: 'Project Management Services – Sports Delivery Programme {month}', due: '20th' },
-    'AC|SF Projects': { contact: 'Auckland Council', reference: '6500136549', header: 'Project Management Services – Sports Delivery Programme {month}', due: '20th' },
+    'AC|SF': { contact: 'Auckland Council', reference: '6500136549', header: 'Project Management Services – Sports Delivery Programme {month}', due: '20th', schedule: 'sf' },
+    'AC|SF Projects': { contact: 'Auckland Council', reference: '6500136549', header: 'Project Management Services – Sports Delivery Programme {month}', due: '20th', schedule: 'sf' },
     'AC|Tender': { contact: 'Auckland Council', reference: '6500168661', header: 'P27 - Sports Field Tender Evaluation', due: '20th' },
     'AC|Riverhead War Memorial': { contact: 'Auckland Council', reference: 'PO 3000435011', header: 'Riverhead War Memorial Sports Field Upgrade', due: '20th' },
     'AC|Stadiums': { contact: 'Auckland Council', reference: '', header: 'Stadiums - Natural Turf Contract', due: '20th' },

@@ -72,7 +72,9 @@
     const d = defaultConfig();
     if (!c) return d;
     const s = Object.assign(defaultSettings(), c.settings || {});
-    s.projects = Object.assign(clone(window.GS_BILLING_DEFAULTS.projects), (c.settings && c.settings.projects) || {});
+    const defP = clone(window.GS_BILLING_DEFAULTS.projects), savedP = (c.settings && c.settings.projects) || {};
+    s.projects = {};
+    for (const k of new Set([...Object.keys(defP), ...Object.keys(savedP)])) s.projects[k] = Object.assign({}, defP[k] || {}, savedP[k] || {});
     s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
     s.invoiced = (c.settings && c.settings.invoiced) || [];
     return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, settings: s };
@@ -634,9 +636,32 @@
     const group = list.filter(p => key(p) === k0);
     return group.length === list.length ? [] : group;
   }
+  // ----- sports field allocation (stored per client|project|date) -----
+  const allocKey = d => state.inv.client + '|' + d.project + '|' + d.date;
+  function allocFor(d) {
+    const st = (state.settings.alloc || {})[allocKey(d)];
+    return st ? st : C.suggestAlloc(d);
+  }
+  function setAlloc(d, field, value) {
+    state.settings.alloc = state.settings.alloc || {};
+    const cur = Object.assign({}, allocFor(d)); delete cur.suggested;
+    cur[field] = value;
+    state.settings.alloc[allocKey(d)] = cur;
+    saveSettings();
+  }
+  function computeInv() {
+    const inv = state.inv;
+    if (inv.sf) {
+      const desc = C.sfDescriptions(inv.days, allocFor);
+      inv.lines.forEach(l => { if (l.kind === 'alloc' && l.auto) l.description = desc[l.cat]; });
+    }
+    return C.computeLines(inv.lines, inv.days, inv.assign, allocFor);
+  }
+
   function startInvoice(client, projects, start, end) {
     if (!projects || !projects.length) projects = client ? defaultProjects(client, start, end) : [];
     state.inv = { client, projects: projects || [], start, end, assign: {}, lines: null, meta: null };
+    state.inv.sf = billingFor(client, (projects && projects[0]) || defaultProjects(client, start, end)[0] || '*').schedule === 'sf';
     rebuildInvoice(true);
   }
 
@@ -645,7 +670,8 @@
     inv.days = C.invoiceDays(state.data.rows, inv);
     const monthTxt = (() => { const [y, m] = inv.end.split('-').map(Number); return `${C.MONTHS[m - 1]} ${y}`; })();
     const bill = p => { const b = billingFor(inv.client, p); return { ...b, header: (b.header || '').replace('{month}', monthTxt) }; };
-    inv.lines = C.defaultLines(inv.days, bill, { consultant: state.settings.consultant });
+    const firstProj = inv.days.find(x => x.hours)?.project || '*';
+    inv.lines = inv.sf ? C.sfLines(inv.days, allocFor, bill(firstProj).header) : C.defaultLines(inv.days, bill, { consultant: state.settings.consultant });
     inv.assign = {};
     if (resetMeta || !inv.meta) {
       const projs = [...new Set(inv.days.map(x => x.project))];
@@ -660,6 +686,42 @@
       inv.dueRule = b.due;
     }
     inv.result = null;
+  }
+
+
+  // Sports field schedule table (matches the SF month tabs)
+  function sfTableHTML(days) {
+    const n = v => (+v || 0);
+    const cell = (d, f, v, step = 0.25) => `<td class="num"><input type="number" min="0" step="${step}" class="alloc-in no-print" data-alloc="${esc(d.key)}" data-f="${f}" value="${n(v) || ''}" aria-label="${f} ${C.fmtDateNZ(d.date)}"><span class="print-only">${n(v) ? hrs(n(v)) : ''}</span></td>`;
+    const tot = { hours: 0, adj: 0, visits: 0, nv: 0, p27: 0, admin: 0, tech: 0, total: 0 };
+    let bad = 0, guessed = 0;
+    const rowsH = days.map(d => {
+      const a = allocFor(d); const total = C.allocTotal(a); const check = Math.round((total - n(a.adj)) * 100) / 100;
+      if (check) bad++; if (a.suggested) guessed++;
+      tot.hours += d.hours; tot.adj += n(a.adj); tot.visits += n(a.visits); tot.nv += n(a.nv); tot.p27 += n(a.p27); tot.admin += n(a.admin); tot.tech += n(a.tech); tot.total += total;
+      return `<tr>
+        <td style="white-space:nowrap">${C.fmtDateNZ(d.date)}${a.suggested ? ' <span class="no-print guess" title="First guess from the activity text. Edit any cell to confirm.">&bull;</span>' : ''}</td>
+        <td class="act-cell">${esc(d.activityText) || '-'}</td>
+        <td class="num">${hrs(d.hours)}</td>
+        ${cell(d, 'adj', a.adj)}${cell(d, 'visits', a.visits)}${cell(d, 'nv', a.nv, 1)}${cell(d, 'p27', a.p27)}${cell(d, 'admin', a.admin)}${cell(d, 'tech', a.tech)}
+        <td class="num"><strong>${hrs(total)}</strong></td>
+        <td class="num" style="color:${check ? '#b3412f' : '#2e7d4f'}">${check ? (check > 0 ? '+' : '') + hrs(check) : '0'}</td>
+      </tr>`;
+    }).join('');
+    const rate = days.find(d => d.rate)?.rate || 0;
+    const tc = Math.round((tot.total - tot.adj) * 100) / 100;
+    return `
+      <div class="no-print sf-note">${bad ? `<span class="chip bad">${bad} day${bad === 1 ? '' : 's'} where Total does not match Adj Hours</span>` : '<span class="chip ok">All days balance</span>'}
+        ${guessed ? `<span class="chip warn">${guessed} day${guessed === 1 ? '' : 's'} using a first guess (&bull;)</span>` : ''}
+        <span class="note">Adj Hours is what you bill. Split it across Visits, P27, Reporting-Admin and Technical Support; Check must be 0.</span></div>
+      <div class="table-wrap"><table class="sf-table">
+        <thead><tr><th>Date</th><th>Activities</th><th class="num">Hours</th><th class="num">Adj Hours</th><th class="num">Visits</th><th class="num">No of Visits</th><th class="num">P27</th><th class="num">Reporting-Admin</th><th class="num">Technical Support</th><th class="num">Total</th><th class="num">Check</th></tr></thead>
+        <tbody>${rowsH || '<tr><td colspan="11" class="muted">No time in this period.</td></tr>'}</tbody>
+        <tfoot>
+          <tr><td colspan="2">Total hours</td><td class="num">${hrs(tot.hours)}</td><td class="num">${hrs(tot.adj)}</td><td class="num">${hrs(tot.visits)}</td><td class="num">${tot.nv}</td><td class="num">${hrs(tot.p27)}</td><td class="num">${hrs(tot.admin)}</td><td class="num">${hrs(tot.tech)}</td><td class="num">${hrs(tot.total)}</td><td class="num" style="color:${tc ? '#b3412f' : '#2e7d4f'}">${tc ? hrs(tc) : '0'}</td></tr>
+          <tr class="sf-money"><td colspan="3">At ${money(rate)}/h</td><td class="num">${money(tot.adj * rate)}</td><td class="num">${money(tot.visits * rate)}</td><td></td><td class="num">${money(tot.p27 * rate)}</td><td class="num">${money(tot.admin * rate)}</td><td class="num">${money(tot.tech * rate)}</td><td class="num">${money(tot.total * rate)}</td><td></td></tr>
+        </tfoot>
+      </table></div>`;
   }
 
   function renderInvoicing(el) {
@@ -681,13 +743,14 @@
     }
     const projList = [...pm.entries()].sort((a, b) => b[1].a - a[1].a);
     const periodMonth = inv.start === C.monthStart(C.monthKey(inv.start)) && inv.end === C.monthEnd(C.monthKey(inv.start)) ? C.monthKey(inv.start) : '';
-    const comp = C.computeLines(inv.lines, inv.days, inv.assign);
+    const comp = computeInv();
     const timeLines = comp.lines.filter(l => l.kind === 'time');
+    const allocLines = comp.lines.filter(l => l.kind === 'alloc');
     const m = inv.meta;
     const multiProj = new Set(inv.days.map(x => x.project)).size > 1;
     const workDays = inv.days.filter(x => x.hours);
     const kmDays = inv.days.filter(x => x.kms);
-    const labour = timeLines.reduce((a, l) => a + l.amount, 0);
+    const labour = timeLines.concat(allocLines).reduce((a, l) => a + l.amount, 0);
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
     const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
     const projTitle = inv.projects.length ? inv.projects.join(', ') : [...new Set(workDays.map(x => x.project))].join(', ');
@@ -713,6 +776,7 @@
             <div class="field"><span>Projects</span>
               <div class="checklist">${projList.map(([p, x]) => `<label><input type="checkbox" value="${esc(p)}" ${!inv.projects.length || inv.projects.includes(p) ? 'checked' : ''}> ${esc(p)} <span class="num">${hrs(x.h)} h</span></label>`).join('') || '<span class="muted">None</span>'}</div>
             </div>
+            <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iSF" ${inv.sf ? 'checked' : ''} style="margin-top:4px"> <span>Sports field schedule<br><span class="muted" style="font-size:.8rem">Split hours into Visits, P27, Reporting-Admin and Technical Support</span></span></label>
             ${billingFor(inv.client, projList[0]?.[0]).check ? `<div class="callout">Check who this project is billed to on the Setup page.</div>` : ''}
           </div>
           <div class="panel">
@@ -736,7 +800,7 @@
                 <button class="btn btn-small" id="pdfBtn">Download PDF</button>
                 <button class="btn btn-small btn-quiet" id="printBtn">Print</button>
               </div></div>
-            <div class="paper" id="scheduleDoc">
+            <div class="paper${inv.sf ? ' sf' : ''}" id="scheduleDoc">
               <div class="doc-head">
                 <div><div class="org">Greenspace Consulting Limited</div><div style="font-size:.85rem;color:#5d6a61">stu@greenspaceconsulting.co.nz</div></div>
                 <div><div class="doc-title">Schedule of Hours</div><div style="font-size:.85rem;color:#5d6a61;text-align:right">Supporting document${m.number ? ' for invoice ' + esc(m.number) : ''}</div></div>
@@ -748,7 +812,7 @@
                 <div><span>Reference</span>${esc(m.reference) || '-'}</div>
                 <div><span>Consultant</span>${esc(state.settings.consultant)}</div>
               </div>
-              <div class="table-wrap"><table>
+${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Activities</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Amount</th>${timeLines.length > 1 ? '<th class="no-print">Invoice line</th>' : ''}</tr></thead>
                 <tbody>${workDays.map(x => `<tr>
                   <td style="white-space:nowrap">${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}
@@ -758,6 +822,7 @@
                 </tr>`).join('') || `<tr><td colspan="6" class="muted">No time in this period.</td></tr>`}</tbody>
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total time</td><td class="num">${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</td><td></td><td class="num">${money(workDays.reduce((a, x) => a + x.amount, 0))}</td>${timeLines.length > 1 ? '<td class="no-print"></td>' : ''}</tr></tfoot>
               </table></div>
+`}
               ${kmDays.length ? `<div class="doc-section"><h3>Vehicle</h3><div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Trip</th><th class="num">Km</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
                 <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${esc(x.kmNotes.join('; ')) || '-'}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
@@ -790,11 +855,11 @@
             <div class="table-wrap"><table class="xero-lines">
               <thead><tr><th style="width:44%">Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Account</th><th>Tax rate</th><th class="num">Amount NZD</th><th></th></tr></thead>
               <tbody>${comp.lines.map((l, i) => `<tr class="${l.kind === 'heading' ? 'heading-row' : ''}">
-                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item' }[l.kind]}</div>
+                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item', alloc: { visits: 'Site visits', admin: 'Reporting-Admin', tech: 'Technical Support', p27: 'P27' }[l.cat] + (l.quantity ? '' : ' · no hours, left off the invoice') }[l.kind]}</div>
                   <textarea rows="${l.kind === 'heading' ? 3 : 2}" data-desc="${i}" aria-label="Description line ${i + 1}">${esc(l.description)}</textarea></td>
                 ${l.kind === 'heading' ? '<td colspan="5" class="muted" style="font-size:.8rem">Description only</td>' : `
                 <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : hrs(l.quantity)}</td>
-                <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : l.kind === 'time' ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
+                <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : (l.kind === 'time' || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
                 <td>${esc(state.settings.accountCode)} Sales</td><td>15% GST on Income</td>
                 <td class="num">${money(l.amount)}</td>`}
                 <td><button class="btn-danger btn" data-del="${i}" aria-label="Remove line ${i + 1}">&times;</button></td>
@@ -834,9 +899,16 @@
       rebuildInvoice(true); rerender();
     });
     $$('.line-sel', el).forEach(s => s.onchange = () => { inv.assign[s.dataset.day] = +s.value; rerender(); });
+    $('#iSF').onchange = e => { inv.sf = e.target.checked; rebuildInvoice(false); rerender(); };
+    $$('[data-alloc]', el).forEach(inp => inp.onchange = () => {
+      const d = inv.days.find(x => x.key === inp.dataset.alloc); if (!d) return;
+      const v = inp.value === '' ? 0 : +inp.value;
+      setAlloc(d, inp.dataset.f, isFinite(v) ? v : 0);
+      const y = window.scrollY; rerender(); window.scrollTo({ top: y });
+    });
     const metaInput = (id, k) => { $(id).onchange = e => { m[k] = e.target.value.trim(); if (k === 'contactName') m.contactId = state.settings.contacts[m.contactName] || ''; if (k === 'date' && inv.dueRule) m.due = C.dueDateFor(m.date, inv.dueRule); rerender(); }; };
     metaInput('#mContact', 'contactName'); metaInput('#mNumber', 'number'); metaInput('#mRef', 'reference'); metaInput('#mDate', 'date'); metaInput('#mDue', 'due');
-    $$('[data-desc]', el).forEach(t => t.oninput = () => { inv.lines[+t.dataset.desc].description = t.value; });
+    $$('[data-desc]', el).forEach(t => t.oninput = () => { const l = inv.lines[+t.dataset.desc]; l.description = t.value; l.auto = false; });
     $$('[data-desc]', el).forEach(t => t.onchange = rerender);
     $$('[data-rate]', el).forEach(t => t.onchange = () => { const l = inv.lines[+t.dataset.rate]; const v = parseFloat(t.value); l.manualRate = isFinite(v) && v > 0 ? v : null; rerender(); });
     $$('[data-qty]', el).forEach(t => t.onchange = () => { inv.lines[+t.dataset.qty].quantity0 = t.value; rerender(); });
@@ -856,7 +928,7 @@
     $('#pdfBtn').onclick = () => downloadPDF();
     $('#printBtn').onclick = () => printDoc($('#scheduleDoc'));
     $('#csvBtn').onclick = () => {
-      const csv = C.xeroCSV(invForExport(), C.computeLines(inv.lines, inv.days, inv.assign), state.settings);
+      const csv = C.xeroCSV(invForExport(), computeInv(), state.settings);
       downloadBlob(new Blob([csv], { type: 'text/csv' }), `Xero import ${m.number || ''} ${m.contactName}.csv`.replace(/\s+/g, ' ').trim());
     };
     $('#copyBtn').onclick = () => copyText(invoiceText());
@@ -870,7 +942,7 @@
     return { contactName: m.contactName, contactId: m.contactId, number: m.number, reference: m.reference, date: m.date, dueDate: m.due };
   }
   function invoiceText() {
-    const inv = state.inv, m = inv.meta, comp = C.computeLines(inv.lines, inv.days, inv.assign);
+    const inv = state.inv, m = inv.meta, comp = computeInv();
     const lines = comp.lines.map(l => l.kind === 'heading' ? l.description : `${l.description}\t${hrs(l.quantity)} x ${money(l.unitAmount)} = ${money(l.amount)}`);
     return [`To: ${m.contactName}`, `Invoice: ${m.number}`, `Reference: ${m.reference}`, `Date: ${C.fmtDateNZ(m.date)}  Due: ${C.fmtDateNZ(m.due)}`, '', ...lines, '', `Subtotal ${money(comp.subtotal)}`, `GST ${money(comp.gst)}`, `Total ${money(comp.total)}`].join('\n');
   }
@@ -879,7 +951,7 @@
     const projects = [...new Set(inv.days.map(x => x.project))];
     const mk = C.monthKey(inv.start);
     state.settings.invoiced = state.settings.invoiced.filter(i => !(i.month === mk && i.client === inv.client && i.projects.join() === projects.join()));
-    state.settings.invoiced.push({ month: mk, client: inv.client, projects, start: inv.start, end: inv.end, number: number || inv.meta.number, total: total ?? C.computeLines(inv.lines, inv.days, inv.assign).total, at: new Date().toISOString() });
+    state.settings.invoiced.push({ month: mk, client: inv.client, projects, start: inv.start, end: inv.end, number: number || inv.meta.number, total: total ?? computeInv().total, at: new Date().toISOString() });
     // move the suggested next number on
     const n = (number || inv.meta.number || '').match(/^(.*?)(\d+)$/);
     if (n && (number || inv.meta.number) === state.settings.nextInvoiceNumber) state.settings.nextInvoiceNumber = n[1] + String(+n[2] + 1).padStart(n[2].length, '0');
@@ -943,7 +1015,7 @@
   }
   async function createInXero() {
     const inv = state.inv, m = inv.meta;
-    const comp = C.computeLines(inv.lines, inv.days, inv.assign);
+    const comp = computeInv();
     if (!m.contactName) { toast('Add the Xero contact first.'); return; }
     const btn = $('#xeroCreate'); btn.disabled = true; btn.textContent = 'Creating draft ...';
     const out = $('#invResult');
@@ -1016,13 +1088,14 @@
       <div class="panel">
         <div class="panel-head"><h2>Who each project is billed to</h2><span class="note">Fills the draft invoice. "Client|*" covers every project for that client. Use {month} in a heading to insert the invoice month.</span></div>
         <div class="table-wrap"><table class="setup-table">
-          <thead><tr><th>Client | Project</th><th>Xero contact</th><th>Reference / PO</th><th>Invoice heading</th><th>Due</th></tr></thead>
+          <thead><tr><th>Client | Project</th><th>Xero contact</th><th>Reference / PO</th><th>Invoice heading</th><th>Due</th><th>Schedule</th></tr></thead>
           <tbody>${billKeys.map(k => { const p = s.projects[k] || { contact: '', reference: '', header: '', due: '20th' }; return `<tr data-key="${esc(k)}">
             <td class="key">${esc(k.replace('|', ' | '))}${p.check ? ' <span class="chip warn">check</span>' : ''}</td>
             <td><input type="text" data-f="contact" value="${esc(p.contact)}" list="contactList2" aria-label="Xero contact for ${esc(k)}"></td>
             <td><input type="text" data-f="reference" value="${esc(p.reference)}" aria-label="Reference for ${esc(k)}"></td>
             <td><input type="text" data-f="header" value="${esc(p.header)}" aria-label="Heading for ${esc(k)}"></td>
-            <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, tx]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${tx}</option>`).join('')}</select></td></tr>`; }).join('')}</tbody>
+            <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, tx]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${tx}</option>`).join('')}</select></td>
+            <td><select data-f="schedule" aria-label="Schedule type for ${esc(k)}"><option value="">Standard</option><option value="sf" ${p.schedule === 'sf' ? 'selected' : ''}>Sports fields</option></select></td></tr>`; }).join('')}</tbody>
         </table></div>
         <datalist id="contactList2">${contacts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       </div>
