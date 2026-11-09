@@ -231,7 +231,7 @@
       const first = pd[0].date, last = pd[pd.length - 1].date;
       const acts = uniqueJoin(pd.flatMap(d => d.activities), 600);
       const header = (b.header || '').trim();
-      lines.push({ id: id++, kind: 'heading', project: p, description: header ? (acts ? `${header} - ${acts}` : header) : acts || p });
+      lines.push({ id: id++, kind: 'heading', project: p, header, auto: true, description: header ? (acts ? `${header} - ${acts}` : header) : acts || p });
       lines.push({ id: id++, kind: 'time', project: p, description: `Consulting services - ${consultant} (${rangeText(first, last)} as per schedule emailed)` });
     }
     const kd = days.filter(d => d.kms);

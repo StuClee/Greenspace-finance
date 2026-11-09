@@ -674,8 +674,33 @@
     for (const r of state.data.rows) if (r.client === client && r.date >= start && r.date <= end) m.set(r.project, (m.get(r.project) || 0) + r.amount + r.kmAmt + 0.001);
     return [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '*';
   }
+  // ----- per-day edits on the schedule (activities wording, Total Hours) -----
+  const dayEditKey = d => state.inv.client + '|' + d.project + '|' + d.date;
+  function loadDays() {
+    const inv = state.inv, ed = state.settings.dayEdits || {};
+    inv.days = C.invoiceDays(state.data.rows, inv).map(d => {
+      d.hoursRaw = d.hours; d.activityRaw = d.activityText;
+      const e = ed[dayEditKey(d)];
+      if (e && e.act) { d.activityText = e.act; d.activities = e.act.split(/;\s*/).map(x => x.trim()).filter(Boolean); }
+      if (e && !inv.sf && e.adj !== undefined && e.adj !== null && e.adj !== '') { d.hours = +e.adj; d.amount = C.round2(d.hours * d.rate); }
+      return d;
+    });
+  }
+  function setDayEdit(d, field, value) {
+    state.settings.dayEdits = state.settings.dayEdits || {};
+    const k = dayEditKey(d), cur = Object.assign({}, state.settings.dayEdits[k]);
+    if (value === '' || value === null || value === undefined) delete cur[field]; else cur[field] = value;
+    if (Object.keys(cur).length) state.settings.dayEdits[k] = cur; else delete state.settings.dayEdits[k];
+    saveSettings();
+  }
   function computeInv() {
     const inv = state.inv;
+    if (!inv.sf) inv.lines.forEach(l => {
+      if (l.kind === 'heading' && l.auto) {
+        const acts = C.uniqueJoin(inv.days.filter(d => d.hours && (!l.project || d.project === l.project)).flatMap(d => d.activities), 600);
+        l.description = l.header ? (acts ? `${l.header} - ${acts}` : l.header) : acts || l.project;
+      }
+    });
     if (inv.sf) {
       const desc = C.sfDescriptions(inv.days, allocFor);
       inv.lines.forEach(l => { if (l.kind === 'alloc' && l.auto) l.description = desc[l.cat]; });
@@ -683,20 +708,24 @@
     return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0 });
   }
 
+  // Sports fields / Landscaping / Standard, from the billing set-up of the first ticked project
+  function setScheduleType(inv) {
+    const first = (inv.projects && inv.projects[0]) || firstProjectFor(inv.client, inv.start, inv.end);
+    const bs = billingFor(inv.client, first).schedule;
+    inv.sf = bs === 'sf';
+    inv.land = bs === 'land' || (!inv.sf && (first === 'Landscaping' || (first === '*' && (state.config.materials || []).some(m => m.client === inv.client))));
+  }
   function startInvoice(client, projects, start, end) {
     if (!projects || !projects.length) projects = client ? defaultProjects(client, start, end) : [];
     state.inv = { client, projects: projects || [], start, end, assign: {}, lines: null, meta: null };
-    const first = (projects && projects[0]) || firstProjectFor(client, start, end);
-    const bs = billingFor(client, first).schedule;
-    state.inv.sf = bs === 'sf';
-    state.inv.land = bs === 'land' || (!state.inv.sf && (first === 'Landscaping' || (first === '*' && (state.config.materials || []).some(m => m.client === client))));
+    setScheduleType(state.inv);
     state.inv.matOff = {};
     rebuildInvoice(true);
   }
 
   function rebuildInvoice(resetMeta) {
     const inv = state.inv;
-    inv.days = C.invoiceDays(state.data.rows, inv);
+    loadDays();
     const monthTxt = (() => { const [y, m] = inv.end.split('-').map(Number); return `${C.MONTHS[m - 1]} ${y}`; })();
     const bill = p => { const b = billingFor(inv.client, p); return { ...b, header: (b.header || '').replace('{month}', monthTxt) }; };
     const firstProj = inv.days.find(x => x.hours)?.project || '*';
@@ -733,6 +762,12 @@
     </table></div><p class="note no-print">Untick anything that should wait for a later invoice. Unticked items are left off the PDF and the invoice.</p></div>`;
   }
 
+  // Editable activities cell (screen: text box; PDF/print: plain text)
+  function actCell(d) {
+    const edited = d.activityText !== d.activityRaw;
+    return `<td class="act-cell"><textarea class="act-in no-print${edited ? ' edited' : ''}" rows="${Math.min(4, Math.max(1, Math.ceil((d.activityText || '').length / 48)))}" data-act="${esc(d.key)}" aria-label="Activities ${C.fmtDateNZ(d.date)}" title="${edited ? 'Edited. Clear the box to go back to the timesheet wording.' : 'Edit the wording for the schedule and invoice'}">${esc(d.activityText)}</textarea><span class="print-only">${esc(d.activityText) || '-'}</span></td>`;
+  }
+
   // Sports field schedule table (matches the SF month tabs)
   function sfTableHTML(days) {
     const n = v => (+v || 0);
@@ -745,7 +780,7 @@
       tot.hours += d.hours; tot.adj += n(a.adj); tot.visits += n(a.visits); tot.nv += n(a.nv); tot.p27 += n(a.p27); tot.admin += n(a.admin); tot.tech += n(a.tech); tot.total += total;
       return `<tr>
         <td style="white-space:nowrap">${C.fmtDateNZ(d.date)}${a.suggested ? ' <span class="no-print guess" title="First guess from the activity text. Edit any cell to confirm.">&bull;</span>' : ''}</td>
-        <td class="act-cell">${esc(d.activityText) || '-'}</td>
+        ${actCell(d)}
         <td class="num screen-only">${hrs(d.hours)}</td>
         ${cell(d, 'adj', a.adj)}${cell(d, 'visits', a.visits)}${cell(d, 'nv', a.nv, 1)}${cell(d, 'p27', a.p27)}${cell(d, 'admin', a.admin)}${cell(d, 'tech', a.tech)}
         <td class="num"><strong>${hrs(total)}</strong></td>
@@ -779,6 +814,7 @@
       startInvoice(clients[0] || '', [], C.monthStart(mk), C.monthEnd(mk));
     }
     const inv = state.inv;
+    loadDays();
     const clients = billableClients(inv.start, inv.end);
     if (inv.client && !clients.includes(inv.client)) clients.unshift(inv.client);
     // projects with hours for this client & period
@@ -820,7 +856,7 @@
             <label class="field"><span>Client (timesheet code)</span>
               <select id="iClient">${clients.map(c => `<option ${c === inv.client ? 'selected' : ''}>${esc(c)}</option>`).join('') || '<option value="">No billable time in this period</option>'}</select></label>
             <div class="field"><span>Projects</span>
-              <div class="checklist">${projList.map(([p, x]) => `<label><input type="checkbox" value="${esc(p)}" ${!inv.projects.length || inv.projects.includes(p) ? 'checked' : ''}> ${esc(p)} <span class="num">${hrs(x.h)} h</span></label>`).join('') || '<span class="muted">None</span>'}</div>
+              <div class="checklist">${projList.map(([p, x]) => `<label><input type="checkbox" class="proj-cb" value="${esc(p)}" ${!inv.projects.length || inv.projects.includes(p) ? 'checked' : ''}> ${esc(p)} <span class="num">${hrs(x.h)} h</span></label>`).join('') || '<span class="muted">None</span>'}</div>
             </div>
             <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iSF" ${inv.sf ? 'checked' : ''} style="margin-top:4px"> <span>Sports field schedule<br><span class="muted" style="font-size:.8rem">Split hours into Visits, P27, Reporting-Admin and Technical Support</span></span></label>
             <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iLand" ${inv.land ? 'checked' : ''} style="margin-top:4px"> <span>Landscaping schedule<br><span class="muted" style="font-size:.8rem">Labour from the timesheet plus this client's materials</span></span></label>
@@ -861,14 +897,16 @@
                 <div><span>Consultant</span>${esc(state.settings.consultant)}</div>
               </div>
 ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.land ? '<h3 style="margin-bottom:8px">Labour</h3>' : ''}              <div class="table-wrap"><table>
-                <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Activities</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Amount</th>${timeLines.length > 1 ? '<th class="no-print">Invoice line</th>' : ''}</tr></thead>
+                <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Activities</th><th class="num screen-only">Hours</th><th class="num">Total Hours</th><th class="num">Rate</th><th class="num">Amount</th>${timeLines.length > 1 ? '<th class="no-print">Invoice line</th>' : ''}</tr></thead>
                 <tbody>${workDays.map(x => `<tr>
                   <td style="white-space:nowrap">${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}
-                  <td class="act-cell">${esc(x.activityText) || '<span style="color:#5d6a61">-</span>'}</td>
-                  <td class="num">${hrs(x.hours)}</td><td class="num">${money(x.rate)}</td><td class="num">${money(x.amount)}</td>
+                  ${actCell(x)}
+                  <td class="num screen-only">${hrs(x.hoursRaw)}</td>
+                  <td class="num"><input type="number" min="0" step="0.25" class="alloc-in no-print${x.hours !== x.hoursRaw ? ' edited' : ''}" data-adj="${esc(x.key)}" value="${x.hours}" aria-label="Total Hours ${C.fmtDateNZ(x.date)}"><span class="print-only">${hrs(x.hours)}</span></td>
+                  <td class="num">${money(x.rate)}</td><td class="num">${money(x.amount)}</td>
                   ${timeLines.length > 1 ? `<td class="no-print"><select class="line-sel" data-day="${esc(x.key)}">${timeLines.map(l => `<option value="${l.id}" ${l.dayKeys.includes(x.key) ? 'selected' : ''}>${lineLabel(l)}${l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''}</option>`).join('')}</select></td>` : ''}
                 </tr>`).join('') || `<tr><td colspan="6" class="muted">No time in this period.</td></tr>`}</tbody>
-                <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total time</td><td class="num">${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</td><td></td><td class="num">${money(workDays.reduce((a, x) => a + x.amount, 0))}</td>${timeLines.length > 1 ? '<td class="no-print"></td>' : ''}</tr></tfoot>
+                <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total time</td><td class="num screen-only">${hrs(workDays.reduce((a, x) => a + x.hoursRaw, 0))}</td><td class="num">${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</td><td></td><td class="num">${money(workDays.reduce((a, x) => a + x.amount, 0))}</td>${timeLines.length > 1 ? '<td class="no-print"></td>' : ''}</tr></tfoot>
               </table></div>
 `}
               ${inv.land ? matTableHTML() : ''}
@@ -943,9 +981,10 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     $('#iStart').onchange = e => { if (e.target.value) { inv.start = e.target.value; rebuildInvoice(true); rerender(); } };
     $('#iEnd').onchange = e => { if (e.target.value) { inv.end = e.target.value; rebuildInvoice(true); rerender(); } };
     $('#iClient').onchange = e => { startInvoice(e.target.value, [], inv.start, inv.end); rerender(); };
-    $$('.checklist input', el).forEach(cb => cb.onchange = () => {
-      const all = $$('.checklist input', el); const on = all.filter(x => x.checked).map(x => x.value);
+    $$('.proj-cb', el).forEach(cb => cb.onchange = () => {
+      const all = $$('.proj-cb', el); const on = all.filter(x => x.checked).map(x => x.value);
       inv.projects = on.length === all.length ? [] : on; if (!on.length) { cb.checked = true; return; }
+      setScheduleType(inv); inv.matOff = {};
       rebuildInvoice(true); rerender();
     });
     $$('.line-sel', el).forEach(s => s.onchange = () => { inv.assign[s.dataset.day] = +s.value; rerender(); });
@@ -955,6 +994,18 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       state.settings.trips[tripKey(d)] = inp.value.trim();
       saveSettings(); toast('Trip name saved');
       const sp = inp.nextElementSibling; if (sp) sp.textContent = inp.value.trim() || '-';
+    });
+    $$('[data-act]', el).forEach(t => t.onchange = () => {
+      const d = inv.days.find(x => x.key === t.dataset.act); if (!d) return;
+      const v = t.value.trim();
+      setDayEdit(d, 'act', v && v !== d.activityRaw ? v : '');
+      const y = window.scrollY; rerender(); window.scrollTo({ top: y });
+    });
+    $$('[data-adj]', el).forEach(inp => inp.onchange = () => {
+      const d = inv.days.find(x => x.key === inp.dataset.adj); if (!d) return;
+      const v = inp.value === '' ? '' : +inp.value;
+      setDayEdit(d, 'adj', v === '' || v === d.hoursRaw ? '' : v);
+      const y = window.scrollY; rerender(); window.scrollTo({ top: y });
     });
     $('#iSF').onchange = e => { inv.sf = e.target.checked; if (inv.sf) inv.land = false; rebuildInvoice(false); rerender(); };
     $('#iLand').onchange = e => { inv.land = e.target.checked; if (inv.land) inv.sf = false; inv.matOff = {}; rebuildInvoice(false); rerender(); };
@@ -1091,7 +1142,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         }
       });
     } else if (workDays.length) {
-      const head = ['Date', ...(multiProj ? ['Project'] : []), 'Activities', 'Hours', 'Rate', 'Amount'];
+      const head = ['Date', ...(multiProj ? ['Project'] : []), 'Activities', 'Total Hours', 'Rate', 'Amount'];
       const body = workDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), d.activityText || '-', hrs(d.hours), money(d.rate), money(d.amount)]);
       const off = multiProj ? 1 : 0;
       doc.autoTable({ ...base, startY: y, head: [head], body,
