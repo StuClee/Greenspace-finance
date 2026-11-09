@@ -978,29 +978,122 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
     const m = state.inv.meta; const [y, mo] = state.inv.end.split('-');
     return `Schedule ${m.number ? m.number + ' ' : ''}${m.contactName} ${C.MONTHS[+mo - 1]} ${y}.pdf`.replace(/[\\/:*?"<>|]/g, '');
   }
-  function pdfWorker() {
-    // Render from a fixed-width A4 copy so the on-screen layout and scroll position do not matter
-    const src = $('#scheduleDoc');
-    const wrap = document.createElement('div');
-    wrap.className = 'pdf-mode';
-    wrap.style.cssText = 'width:660px;background:#fff;';
-    const copy = src.cloneNode(true);
-    copy.removeAttribute('id');
-    wrap.appendChild(copy);
-    return html2pdf().set({
-      margin: [12, 12, 14, 12], filename: pdfName(), image: { type: 'jpeg', quality: 0.96 },
-      html2canvas: { scale: 2, backgroundColor: '#ffffff', useCORS: true, scrollX: 0, scrollY: 0 },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.doc-totals'] }
-    }).from(wrap);
+  // ----- Schedule of Hours PDF (built directly with jsPDF + AutoTable: real text, clean page breaks) -----
+  function buildSchedulePDF() {
+    const { jsPDF } = window.jspdf;
+    const inv = state.inv, m = inv.meta, comp = computeInv();
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    const W = doc.internal.pageSize.getWidth(), M = 14;
+    const green = [44, 106, 68], ink = [27, 36, 30], grey = [93, 106, 97], line = [217, 224, 215];
+    const workDays = inv.days.filter(x => x.hours), kmDays = inv.days.filter(x => x.kms);
+    const multiProj = new Set(inv.days.map(x => x.project)).size > 1;
+    const projTitle = inv.projects.length ? inv.projects.join(', ') : [...new Set(workDays.map(x => x.project))].join(', ');
+    const n = v => (+v || 0), h = v => n(v) ? hrs(n(v)) : '';
+
+    // header
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(...green);
+    doc.text('Greenspace Consulting Limited', M, 18);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
+    doc.text('stu@greenspaceconsulting.co.nz', M, 23);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...ink);
+    doc.text('Schedule of Hours', W - M, 18, { align: 'right' });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
+    doc.text('Supporting document' + (m.number ? ' for invoice ' + m.number : ''), W - M, 23, { align: 'right' });
+    doc.setDrawColor(...green); doc.setLineWidth(0.8); doc.line(M, 27, W - M, 27);
+    // meta
+    const meta = [['Client', m.contactName], ['Project', projTitle], ['Period', `${C.fmtDateNZ(inv.start)} to ${C.fmtDateNZ(inv.end)}`], ['Reference', m.reference || '-'], ['Consultant', state.settings.consultant]];
+    const colW = (W - 2 * M) / 3;
+    meta.forEach(([k, v], i) => {
+      const x = M + (i % 3) * colW, y = 34 + Math.floor(i / 3) * 11;
+      doc.setFontSize(7); doc.setTextColor(...grey); doc.setFont('helvetica', 'bold'); doc.text(k.toUpperCase(), x, y);
+      doc.setFontSize(9.5); doc.setTextColor(...ink); doc.setFont('helvetica', 'normal'); doc.text(doc.splitTextToSize(String(v || ''), colW - 4)[0] || '', x, y + 4.5);
+    });
+
+    const base = {
+      theme: 'plain', margin: { left: M, right: M, top: 16, bottom: 16 },
+      styles: { font: 'helvetica', fontSize: 8, textColor: ink, cellPadding: { top: 1.6, bottom: 1.6, left: 1.5, right: 1.5 }, lineColor: line, lineWidth: { bottom: 0.2 }, valign: 'top' },
+      headStyles: { fontSize: 6.8, fontStyle: 'bold', textColor: grey, lineWidth: { bottom: 0.4 }, valign: 'bottom' },
+      footStyles: { fontStyle: 'bold', lineWidth: { top: 0.5 }, lineColor: line },
+      rowPageBreak: 'avoid', showHead: 'everyPage'
+    };
+    let y = 34 + 2 * 11 + 2;
+
+    if (inv.sf) {
+      const rate = workDays.find(d => d.rate)?.rate || 0;
+      const t = { adj: 0, visits: 0, nv: 0, p27: 0, admin: 0, tech: 0, total: 0 };
+      const body = workDays.map(d => {
+        const a = allocFor(d), total = C.allocTotal(a), check = Math.round((total - n(a.adj)) * 100) / 100;
+        t.adj += n(a.adj); t.visits += n(a.visits); t.nv += n(a.nv); t.p27 += n(a.p27); t.admin += n(a.admin); t.tech += n(a.tech); t.total += total;
+        return [C.fmtDateNZ(d.date), d.activityText || '-', h(a.adj), h(a.visits), n(a.nv) || '', h(a.p27), h(a.admin), h(a.tech), hrs(total), check ? hrs(check) : '0'];
+      });
+      const tc = Math.round((t.total - t.adj) * 100) / 100;
+      doc.autoTable({ ...base, startY: y,
+        head: [['Date', 'Activities', 'Total Hours', 'Visits', 'No of Visits', 'P27', 'Reporting-Admin', 'Technical Support', 'Total', 'Check']],
+        body,
+        foot: [
+          ['Total hours', '', hrs(t.adj), hrs(t.visits), String(t.nv), hrs(t.p27), hrs(t.admin), hrs(t.tech), hrs(t.total), tc ? hrs(tc) : '0'],
+          [`At ${money(rate)}/h`, '', money0(t.adj * rate), money0(t.visits * rate), '', money0(t.p27 * rate), money0(t.admin * rate), money0(t.tech * rate), money0(t.total * rate), '']
+        ],
+        columnStyles: { 0: { cellWidth: 18 }, 1: { cellWidth: 'auto' }, 2: { cellWidth: 14, halign: 'right' }, 3: { cellWidth: 13, halign: 'right' }, 4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 12, halign: 'right' }, 6: { cellWidth: 16, halign: 'right' }, 7: { cellWidth: 16, halign: 'right' }, 8: { cellWidth: 13, halign: 'right', fontStyle: 'bold' }, 9: { cellWidth: 11, halign: 'right' } },
+        didParseCell: c => {
+          if (c.section === 'head' && c.column.index >= 2) c.cell.styles.halign = 'right';
+          if (c.section === 'foot') { if (c.column.index >= 2) c.cell.styles.halign = 'right'; if (c.row.index === 1) { c.cell.styles.fontStyle = 'normal'; c.cell.styles.textColor = grey; c.cell.styles.fontSize = 7; c.cell.styles.lineWidth = 0; } }
+          if (c.column.index === 9 && c.section !== 'head') c.cell.styles.textColor = c.cell.raw && c.cell.raw !== '0' ? [179, 65, 47] : [46, 125, 79];
+        }
+      });
+    } else {
+      const head = ['Date', ...(multiProj ? ['Project'] : []), 'Activities', 'Hours', 'Rate', 'Amount'];
+      const body = workDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), d.activityText || '-', hrs(d.hours), money(d.rate), money(d.amount)]);
+      const off = multiProj ? 1 : 0;
+      doc.autoTable({ ...base, startY: y, head: [head], body,
+        foot: [['Total time', ...(multiProj ? [''] : []), '', hrs(workDays.reduce((a, x) => a + x.hours, 0)), '', money(workDays.reduce((a, x) => a + x.amount, 0))]],
+        columnStyles: { 0: { cellWidth: 20 }, [2 + off]: { cellWidth: 16, halign: 'right' }, [3 + off]: { cellWidth: 20, halign: 'right' }, [4 + off]: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 2 + off) c.cell.styles.halign = 'right'; }
+      });
+    }
+    y = doc.lastAutoTable.finalY + 8;
+
+    if (kmDays.length) {
+      if (y > 250) { doc.addPage(); y = 18; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Vehicle', M, y); y += 2;
+      doc.autoTable({ ...base, startY: y,
+        head: [['Date', ...(multiProj ? ['Project'] : []), 'Trip', 'Km', 'Rate', 'Amount']],
+        body: kmDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), tripFor(d) || '-', String(d.kms), money(d.kms ? d.kmAmt / d.kms : 0), money(d.kmAmt)]),
+        foot: [['Total vehicle', ...(multiProj ? [''] : []), '', String(kmDays.reduce((a, x) => a + x.kms, 0)), '', money(kmDays.reduce((a, x) => a + x.kmAmt, 0))]],
+        columnStyles: { 0: { cellWidth: 20 }, [multiProj ? 3 : 2]: { cellWidth: 16, halign: 'right' }, [multiProj ? 4 : 3]: { cellWidth: 18, halign: 'right' }, [multiProj ? 5 : 4]: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= (multiProj ? 3 : 2)) c.cell.styles.halign = 'right'; }
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    }
+
+    // totals block
+    const labour = comp.lines.filter(l => l.kind === 'time' || l.kind === 'alloc').reduce((a, l) => a + l.amount, 0);
+    const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
+    const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
+    const rows = [['Labour', money(labour)], ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other items', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
+    if (y > 245) { doc.addPage(); y = 20; }
+    const x0 = W - M - 80;
+    doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(...ink);
+    rows.forEach(([k, v]) => { doc.text(k, x0, y); doc.text(v, W - M, y, { align: 'right' }); y += 5.5; });
+    doc.setDrawColor(...ink); doc.setLineWidth(0.5); doc.line(x0, y - 2.5, W - M, y - 2.5); y += 3;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+    doc.text('Total (incl GST)', x0, y); doc.text(money(comp.total), W - M, y, { align: 'right' });
+
+    // footer on every page
+    const pages = doc.getNumberOfPages();
+    for (let i = 1; i <= pages; i++) {
+      doc.setPage(i); doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...grey);
+      doc.text('Prepared from the Greenspace Consulting timesheet. Times are recorded in 15-minute units.', M, 289);
+      doc.text(`Page ${i} of ${pages}`, W - M, 289, { align: 'right' });
+    }
+    return doc;
   }
   async function downloadPDF() {
-    if (!window.html2pdf) { toast('The PDF tool did not load. Use Print and choose Save as PDF instead.'); return; }
-    try { toast('Building PDF ...'); await pdfWorker().save(); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message); }
+    if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Use Print and choose Save as PDF instead.'); return; }
+    try { buildSchedulePDF().save(pdfName()); toast('PDF downloaded'); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message); }
   }
   async function pdfBase64() {
-    const blob = await pdfWorker().outputPdf('blob');
-    return await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
+    return buildSchedulePDF().output('datauristring').split(',')[1];
   }
   function printDoc(el) {
     el.classList.add('print-target'); document.body.classList.add('printing-doc');
@@ -1041,7 +1134,7 @@ ${inv.sf ? sfTableHTML(workDays) : `              <div class="table-wrap"><table
     try {
       const payload = C.xeroPayload(invForExport(), comp, state.settings);
       let attachment = null;
-      if (window.html2pdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
+      if (window.jspdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
       const r = await fetch('/api/xero-invoice', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invoice: payload, attachment }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || ('Xero returned ' + r.status));
