@@ -79,7 +79,7 @@
     s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
     s.invoiced = (c.settings && c.settings.invoiced) || [];
     s.tiers = Object.assign({ A: 0.2, B: 0.15, C: 0.1, D: 0.05 }, (c.settings && c.settings.tiers) || {});
-    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], settings: s };
+    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], archivedMaterials: c.archivedMaterials || [], settings: s };
   }
 
   const state = {
