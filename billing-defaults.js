@@ -45,3 +45,33 @@ window.GS_BILLING_DEFAULTS = {
     'Libby|*': { contact: 'Libby Lewis', reference: 'Landscaping Services', header: '', due: '3' }
   }
 };
+
+/* Starting rates, projects and targets, from the Config and Working Days tabs (rates from 1 July 2026).
+   Used only until you import your workbook or edit them on the Setup page. */
+window.GS_DEFAULT_CONFIG = {
+  mileageRate: 0.8,
+  projects: [
+    ...['SF', 'SF Projects', 'Tender', 'Riverhead War Memorial', 'Stadiums', 'Arb Contract', 'Ecological', 'Ecological Road Corridor', 'Vector'].map(p => ({ client: 'AC', project: p, rate: 150 })),
+    ...['Sports', 'Field Team', 'Contract', 'Work Mgt System'].map(p => ({ client: 'QLDC', project: p, rate: 150 })),
+    ...['Contract Future', 'Contract Extn', 'Variation'].map(p => ({ client: 'HDC', project: p, rate: 150 })),
+    { client: 'Arborlab', project: 'Arborlab', rate: 150 },
+    { client: 'Consulting', project: 'Other', rate: 150 },
+    ...['Angie', 'Collective', 'Frana', 'J Delmont', 'Kylie', 'Leathard', 'Libby', 'P Delmont', 'Walters'].map(c => ({ client: c, project: 'Landscaping', rate: 100 })),
+    { client: 'Admin', project: 'Admin', rate: 75 },
+    { client: 'Travel', project: 'Travel', rate: 75 },
+    ...['QLDC FT', 'AC SF', 'Business Development', 'Client Development', 'AccountabilityNet', 'CCC'].map(p => ({ client: 'LCC', project: p, rate: p === 'AC SF' ? 150 : 0 })),
+    { client: 'GS', project: 'Business Development', rate: 0 },
+    { client: 'GE', project: 'Business Development', rate: 0 },
+    { client: 'GE', project: 'Management', rate: 0 },
+    { client: 'Gardeners Emporium', project: 'Management', rate: 0 },
+    { client: 'Broking', project: 'Broking', rate: 0 }
+  ],
+  targets: {
+    '2026-09': { target: 19000, targetDays: 22 }, '2026-10': { target: 18500, targetDays: 21 },
+    '2026-11': { target: 18500, targetDays: 21 }, '2026-12': { target: 17500, targetDays: 19 },
+    '2027-01': { target: 22680, targetDays: 21 }, '2027-02': { target: 22680, targetDays: 21 }, '2027-03': { target: 22680, targetDays: 21 },
+    '2027-04': { target: 22680, targetDays: 21 }, '2027-05': { target: 22680, targetDays: 21 }, '2027-06': { target: 22680, targetDays: 21 },
+    '2027-07': { target: 22680, targetDays: 21 }, '2027-08': { target: 22680, targetDays: 21 }, '2027-09': { target: 22680, targetDays: 21 },
+    '2027-10': { target: 22680, targetDays: 21 }, '2027-11': { target: 22680, targetDays: 21 }, '2027-12': { target: 22680, targetDays: 21 }
+  }
+};

@@ -147,6 +147,52 @@
     return { blocks, kmRows };
   }
 
+  // ---------- entries (the app's own records) ----------
+  const toMin = t => { const [h, m] = (t || '0:0').split(':').map(Number); return h * 60 + m; };
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+  // Merge the workbook's 15-minute rows into time blocks (one entry per continuous activity).
+  function rowsToEntries(rows) {
+    const out = [];
+    for (const r of rows) {
+      const last = out[out.length - 1];
+      if (!r.client) { // mileage-only row: attach to the previous entry that day
+        if (r.kms && last && last.date === r.date) { last.kms += r.kms; last.kmAmt = round2(last.kmAmt + r.kmAmt); }
+        continue;
+      }
+      const end = timeAdd(r.time || '00:00', Math.round(r.hours * 60));
+      if (last && last.date === r.date && last.client === r.client && last.project === r.project && last.activity === r.activity && last.rate === r.rate && last.end === r.time) {
+        last.end = end; last.hours += r.hours; last.amount = round2(last.amount + r.amount);
+        if (r.kms) { last.kms += r.kms; last.kmAmt = round2(last.kmAmt + r.kmAmt); }
+        if (r.notes && !last.notes.includes(r.notes)) last.notes = last.notes ? last.notes + '; ' + r.notes : r.notes;
+      } else {
+        out.push({ id: uid(), date: r.date, time: r.time, end, client: r.client, project: r.project, activity: r.activity, notes: r.notes || '',
+          hours: r.hours, rate: r.rate, amount: round2(r.amount), kms: r.kms || 0, kmRate: r.kmRate, kmAmt: round2(r.kmAmt || 0), category: r.category });
+      }
+    }
+    return out;
+  }
+
+  function rateFor(config, client, project) {
+    const p = (config.projects || []).find(x => x.client === client && x.project === project);
+    return p ? (+p.rate || 0) : 0;
+  }
+
+  // Build or update an entry from form fields. Keeps the stored rate unless client/project changed or keepRate is false.
+  function makeEntry(f, config, prev) {
+    const mins = Math.max(0, toMin(f.end) - toMin(f.time));
+    const hours = Math.round(mins / 15) / 4;
+    const sameJob = prev && prev.client === f.client && prev.project === f.project;
+    const rate = f.rate !== undefined && f.rate !== '' && f.rate !== null ? +f.rate : (sameJob ? prev.rate : rateFor(config, f.client, f.project));
+    const kms = +f.kms || 0;
+    const kmRate = (prev && prev.kmRate) || config.mileageRate || 0.8;
+    return {
+      id: (prev && prev.id) || uid(), date: f.date, time: f.time, end: f.end, client: f.client, project: f.project,
+      activity: (f.activity || '').trim(), notes: (f.notes || '').trim(), hours, rate, amount: round2(hours * rate),
+      kms, kmRate, kmAmt: round2(kms * kmRate), category: categorise(f.client, f.project, f.activity || '')
+    };
+  }
+
   function sumBy(list, keyFn, valFn) {
     const m = new Map();
     for (const x of list) { const k = keyFn(x); m.set(k, (m.get(k) || 0) + valFn(x)); }
@@ -314,7 +360,7 @@
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);
