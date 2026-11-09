@@ -27,22 +27,15 @@
       <a href="#setup" data-view="setup">Setup</a>
     </nav>
     <div class="data-status">
-      <span id="dataChip" class="chip">No workbook loaded</span>
-      <label class="btn btn-small" for="fileInput">Load workbook</label>
+      <span id="dataChip" class="chip">Loading ...</span>
       <input id="fileInput" type="file" accept=".xlsx,.xlsm" hidden>
     </div>
   </div>
 </header>
 
 <main id="app" class="wrap">
-  <section id="view-empty" class="view" hidden>
-    <div class="dropzone" id="dropzone">
-      <h1>Load your Monthly Financial System workbook</h1>
-      <p>Drop <strong>2026 Financials.xlsx</strong> here, or use <em>Load workbook</em>. The app reads the Timesheet, Config and Working Days tabs. Your data stays in this browser and is never uploaded.</p>
-      <label class="btn" for="fileInput">Choose workbook</label>
-    </div>
-  </section>
-
+  <section id="view-loading" class="view" hidden><p class="muted">Loading your data ...</p></section>
+  <section id="view-empty" class="view" hidden></section>
   <section id="view-dashboard" class="view" hidden></section>
   <section id="view-timesheet" class="view" hidden></section>
   <section id="view-invoicing" class="view" hidden></section>
@@ -56,7 +49,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="js/core.js"></script>
 <script src="js/billing-defaults.js"></script>
-<script src="js/snapshot.js" onerror="window.GS_SNAPSHOT=null"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
