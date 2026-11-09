@@ -228,7 +228,19 @@ body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { m
 .print-only { display: none; }
 .pdf-mode .print-only { display: inline; }
 .pdf-mode .sf-table { min-width: 0; font-size: .74rem; }
-@media print { .print-only { display: inline !important; } .alloc-in { display: none !important; } .sf-table { min-width: 0; font-size: .72rem; } }
+.trip-in { width: 100%; padding: 4px 6px; font-size: .85rem; }
+.pdf-mode .screen-only { display: none !important; }
+.pdf-mode .sf-table { table-layout: auto; }
+.pdf-mode .paper { box-shadow: none !important; border: 0 !important; padding: 0 !important; }
+.pdf-mode .sf-table td.act-cell { width: 30%; min-width: 140px; max-width: none; }
+.pdf-mode .sf-table td.num { white-space: nowrap; }
+.pdf-mode .sf-table { width: 100%; min-width: 0 !important; font-size: .7rem; }
+.pdf-mode .sf-table th { font-size: .58rem; letter-spacing: .02em; padding: 4px 3px; }
+.pdf-mode .sf-table td { padding: 4px 3px; }
+.pdf-mode .table-wrap { overflow: visible; }
+.pdf-mode .doc-meta { grid-template-columns: repeat(3, 1fr); }
+.pdf-mode .sf-table th { white-space: normal; }
+@media print { .screen-only { display: none !important; } .sf-table { table-layout: auto; } .sf-table td.act-cell { width: 34%; min-width: 200px; } .print-only { display: inline !important; } .alloc-in, .trip-in { display: none !important; } .sf-table { min-width: 0; font-size: .72rem; } }
 
 /* setup */
 .setup-table input, .setup-table select { width: 100%; font-size: .85rem; padding: 5px 7px; }
