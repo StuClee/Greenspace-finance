@@ -181,6 +181,7 @@
   function route() {
     const h = (location.hash || '').replace('#', '');
     state.view = VIEWS.includes(h) ? h : 'dashboard';
+    document.body.dataset.view = state.view;
     $$('.tabs a').forEach(a => a.setAttribute('aria-current', a.dataset.view === state.view ? 'page' : 'false'));
     $$('.view').forEach(v => { v.hidden = true; });
     if (!state.data) { $('#view-loading').hidden = false; return; }
@@ -715,6 +716,7 @@
         ${guessed ? `<span class="chip warn">${guessed} day${guessed === 1 ? '' : 's'} using a first guess (&bull;)</span>` : ''}
         <span class="note">Adj Hours is what you bill. Split it across Visits, P27, Reporting-Admin and Technical Support; Check must be 0.</span></div>
       <div class="table-wrap"><table class="sf-table">
+        <colgroup><col class="c-date"><col class="c-act"><col class="c-n"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-in"><col class="c-n"><col class="c-n"></colgroup>
         <thead><tr><th>Date</th><th>Activities</th><th class="num">Hours</th><th class="num">Adj Hours</th><th class="num">Visits</th><th class="num">No of Visits</th><th class="num">P27</th><th class="num">Reporting-Admin</th><th class="num">Technical Support</th><th class="num">Total</th><th class="num">Check</th></tr></thead>
         <tbody>${rowsH || '<tr><td colspan="11" class="muted">No time in this period.</td></tr>'}</tbody>
         <tfoot>
@@ -761,7 +763,7 @@
         <div><div class="label">Invoicing</div><h1>${esc(m.contactName || 'Choose a client')}</h1></div>
         <div class="xero-status" id="xeroStatus">${xeroStatusHTML()}</div>
       </div>
-      <div class="inv-layout">
+      <div class="inv-layout${inv.sf ? ' wide' : ''}">
         <aside class="inv-side">
           <div class="panel">
             <h3>What to invoice</h3>
