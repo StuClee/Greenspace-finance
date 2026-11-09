@@ -207,6 +207,21 @@ tr.clickable { cursor: pointer; }
 .row-actions { display: flex; gap: 4px; justify-content: flex-end; margin-top: 6px; }
 .row-actions .btn { padding: 4px 8px; font-size: .78rem; }
 
+/* sports field schedule */
+.sf-note { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.sf-table { font-size: .76rem; }
+.sf-table th, .sf-table td { padding: 5px 4px; }
+.sf-table th { white-space: normal; line-height: 1.15; vertical-align: bottom; font-size: .64rem; letter-spacing: .03em; }
+.sf-table .act-cell { min-width: 14ch; max-width: 26ch; }
+.alloc-in { width: 3.7em; padding: 3px 4px; text-align: right; font-size: .78rem; -moz-appearance: textfield; }
+.alloc-in::-webkit-outer-spin-button, .alloc-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.paper.sf { padding: 28px 22px; }
+.sf-table .guess { color: var(--warn); font-weight: 700; }
+.sf-money td { font-weight: 600; color: #5d6a61; border-top: 0; }
+.print-only { display: none; }
+.pdf-mode .print-only { display: inline; }
+@media print { .print-only { display: inline !important; } .alloc-in { display: none !important; } }
+
 /* setup */
 .setup-table input, .setup-table select { width: 100%; font-size: .85rem; padding: 5px 7px; }
 .setup-table td { padding: 4px 6px; }

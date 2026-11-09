@@ -249,9 +249,47 @@
     return s;
   }
 
+  // ---------- Sports field schedule (SF tabs: Adj Hours / Visits / No of Visits / P27 / Reporting-Admin / Technical) ----------
+  const SF_CATS = ['visits', 'admin', 'tech', 'p27'];
+  // First-guess allocation for a day from its activity text. Visits are left for you to enter.
+  function suggestAlloc(day) {
+    const t = (day.activityText || '').toLowerCase();
+    const a = { adj: day.hours, visits: 0, nv: 0, p27: 0, admin: 0, tech: 0, suggested: true };
+    if (/p27|saving/.test(t)) a.p27 = day.hours;
+    else if (day.kms && !/civic|albert st|meeting|call|email|teams/.test(t)) { a.visits = day.hours; a.nv = 1; }
+    else if (/meeting|call|email|teams|civic|admin|follow ?up|report to/.test(t)) a.admin = day.hours;
+    else a.tech = day.hours;
+    return a;
+  }
+  const allocTotal = a => (+a.visits || 0) + (+a.p27 || 0) + (+a.admin || 0) + (+a.tech || 0);
+
+  function sfDescriptions(days, allocFn, opts = {}) {
+    const pick = cat => days.filter(d => d.hours && (+allocFn(d)[cat] || 0) > 0);
+    const range = list => list.length ? rangeText(list[0].date, list[list.length - 1].date) : '';
+    const acts = list => uniqueJoin(list.flatMap(d => d.activities), 420);
+    const v = pick('visits'), nv = v.reduce((s, d) => s + (+allocFn(d).nv || 0), 0);
+    return {
+      visits: `Site visits (${nv || v.length} visit${(nv || v.length) === 1 ? '' : 's'} as per schedule emailed - ${range(v)})`,
+      admin: `Admin/Meetings/Reporting - ${acts(pick('admin'))} (${range(pick('admin'))})`,
+      tech: `Technical Support - Sports Fields - ${acts(pick('tech'))} (${range(pick('tech'))})`,
+      p27: `P27 - ${acts(pick('p27'))} (${range(pick('p27'))})`
+    };
+  }
+  function sfLines(days, allocFn, header) {
+    const desc = sfDescriptions(days, allocFn);
+    let id = 1;
+    const lines = [{ id: id++, kind: 'heading', project: '', description: header || 'Project Management Services – Sports Delivery Programme' }];
+    for (const cat of SF_CATS) lines.push({ id: id++, kind: 'alloc', cat, project: '', description: desc[cat], auto: true });
+    if (days.some(d => d.kms)) {
+      const kd = days.filter(d => d.kms);
+      lines.push({ id: id++, kind: 'vehicle', project: '', description: `Vehicle (${rangeText(kd[0].date, kd[kd.length - 1].date)} as per schedule emailed)` });
+    }
+    return lines;
+  }
+
   // Compute quantities/amounts for lines from day assignments.
   // assign: { dayKey: lineId } for time lines (defaults to the time line of that day's project).
-  function computeLines(lines, days, assign) {
+  function computeLines(lines, days, assign, allocFn) {
     const out = lines.map(l => ({ ...l, quantity: null, unitAmount: null, amount: 0, dayKeys: [] }));
     const byId = new Map(out.map(l => [l.id, l]));
     const timeLines = out.filter(l => l.kind === 'time');
@@ -268,6 +306,13 @@
       if (l.manualRate) { l.unitAmount = l.manualRate; l.amount = round2((l.quantity || 0) * l.manualRate); }
       else l.unitAmount = l.quantity ? round2(l.amount / l.quantity) : 0;
       l.amount = round2(l.amount);
+    }
+    for (const l of out.filter(l => l.kind === 'alloc')) {
+      let q = 0, amt = 0;
+      for (const d of days) { if (!d.hours || !allocFn) continue; const v = +allocFn(d)[l.cat] || 0; q += v; amt += v * d.rate; }
+      l.quantity = q;
+      l.unitAmount = l.manualRate || (q ? round2(amt / q) : (days.find(d => d.rate)?.rate || 0));
+      l.amount = round2(q * l.unitAmount);
     }
     const veh = out.find(l => l.kind === 'vehicle');
     if (veh) {
@@ -360,7 +405,7 @@
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);
