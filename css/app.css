@@ -245,10 +245,11 @@ body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { m
 /* materials */
 .mat-table input, .mat-table select { width: 100%; min-width: 4.5em; font-size: .85rem; padding: 5px 6px; }
 .mat-table td { white-space: nowrap; }
-.mat-table td:nth-child(2) input { min-width: 14em; }
-.mat-table td:nth-child(3) input { min-width: 8em; }
-.mat-table td:nth-child(7) select { min-width: 10.5em; }
-.mat-table td:nth-child(1) input { min-width: 9.5em; }
+.mat-table td:nth-child(3) input { min-width: 14em; }
+.mat-table td:nth-child(4) input { min-width: 8em; }
+.mat-table td:nth-child(8) select { min-width: 10.5em; }
+.mat-table td:nth-child(2) input { min-width: 9.5em; }
+.mat-table .mat-del { min-width: 0; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); }
 tr.mat-off td { opacity: .45; }
 
 /* setup */
