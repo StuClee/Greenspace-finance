@@ -79,7 +79,7 @@
     s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
     s.invoiced = (c.settings && c.settings.invoiced) || [];
     s.tiers = Object.assign({ A: 0.2, B: 0.15, C: 0.1, D: 0.05 }, (c.settings && c.settings.tiers) || {});
-    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], archivedMaterials: c.archivedMaterials || [], settings: s };
+    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], otherItems: c.otherItems || [], archivedMaterials: c.archivedMaterials || [], settings: s };
   }
 
   const state = {
@@ -655,6 +655,7 @@
     const m = new Map();
     for (const x of (state.config.materials || [])) if (!x.invoice && x.date >= C.monthStart(C.monthKey(start)) && x.date <= end) m.set(x.client, (m.get(x.client) || 0) + C.matCalc(x).total);
     for (const r of state.data.rows) if (r.date >= start && r.date <= end && isBillable(r.client) && (r.amount || r.kms)) m.set(r.client, (m.get(r.client) || 0) + r.amount + r.kmAmt);
+    for (const o of (state.config.otherItems || [])) if (!o.invoice && o.date >= start && o.date <= end) m.set(o.client, (m.get(o.client) || 0) + otherAmt(o));
     return [...m.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   }
 
@@ -697,6 +698,63 @@
     const inv = state.inv;
     if (inv.land && includedMats().length && !inv.lines.some(l => l.kind === 'mat')) inv.lines.unshift({ id: Math.max(0, ...inv.lines.map(l => l.id)) + 1, kind: 'mat', project: '', description: 'Plants & Landscaping Materials as per schedule emailed' });
   }
+  // ----- Other: non-labour project items (lab tests, hire, printing ...), stored in config.otherItems -----
+  // { id, client, project, date, description, qty, unit, invoice }
+  const otherAmt = o => C.round2((+o.qty || 0) * (+o.unit || 0));
+  const findOther = id => (state.config.otherItems || []).find(o => o.id === id);
+  function invOthers() {
+    const inv = state.inv; if (!inv || !inv.client) return [];
+    const num = (inv.meta && inv.meta.number) || '';
+    return (state.config.otherItems || []).filter(o => o.client === inv.client && o.date >= inv.start && o.date <= inv.end && (!inv.projects.length || inv.projects.includes(o.project)) && (!o.invoice || o.invoice === num))
+      .sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+  }
+  function includedOthers() { const off = (state.inv && state.inv.otherOff) || {}; return invOthers().filter(o => !off[o.id]); }
+  // Keep the invoice's "Other" heading and one line per included item in step with the schedule
+  function syncOtherLines() {
+    const inv = state.inv; if (!inv.lines) return;
+    const inc = includedOthers();
+    const old = new Map(inv.lines.filter(l => l.kind === 'other').map(l => [l.itemId, l]));
+    let nid = Math.max(0, ...inv.lines.map(l => l.id)) + 1;
+    inv.lines = inv.lines.filter(l => l.kind !== 'other' && !(l.otherHead && !inc.length));
+    if (!inc.length) return;
+    let hi = inv.lines.findIndex(l => l.otherHead);
+    if (hi < 0 && !inv.otherHeadOff) { inv.lines.push({ id: nid++, kind: 'heading', otherHead: true, project: '', description: 'Other' }); hi = inv.lines.length - 1; }
+    const ol = inc.map(o => { const l = old.get(o.id) || { id: nid++, kind: 'other', itemId: o.id }; l.project = o.project; l.description = o.description; return l; });
+    inv.lines.splice(hi >= 0 ? hi + 1 : inv.lines.length, 0, ...ol);
+  }
+  function setOther(id, field, value) {
+    const o = findOther(id); if (!o) return;
+    if (field === 'qty' || field === 'unit') { const v = parseFloat(value); o[field] = isFinite(v) ? v : 0; }
+    else if (field === 'date') {
+      if (!value) return;
+      o.date = value;
+      if (value < state.inv.start || value > state.inv.end) toast('Date is outside this invoice period, so the item has moved off this invoice. It will show on the invoice for that period.', 6000);
+    } else o[field] = String(value).trim();
+    saveSettings();
+  }
+  function otherTableHTML(projChoices) {
+    const list = invOthers(), off = state.inv.otherOff || {};
+    const inc = list.filter(o => !off[o.id]);
+    const addBtn = `<button class="btn btn-small btn-quiet no-print" id="addOther" type="button">+ Add other item</button>`;
+    const intro = `<p class="note no-print">Project costs that are not labour, e.g. lab testing, equipment hire, printing, sub-consultants. They go on the invoice under an <strong>Other</strong> heading.</p>`;
+    if (!list.length) return `<div class="doc-section no-print"><div class="panel-head" style="margin-bottom:4px"><h3 style="margin:0">Other</h3>${addBtn}</div>${intro}</div>`;
+    const showProj = projChoices.length > 1 || new Set(list.map(o => o.project)).size > 1;
+    const projs = o => [...new Set([...projChoices, o.project])].filter(Boolean);
+    const inp = (o, f, type, extra = '') => `<input type="${type}" class="other-in no-print" data-o="${esc(o.id)}" data-of="${f}" value="${esc(o[f] ?? '')}" ${extra} aria-label="${f}">`;
+    return `<div class="doc-section"><div class="panel-head" style="margin-bottom:4px"><h3 style="margin:0">Other</h3>${addBtn}</div><div class="table-wrap"><table class="other-table">
+      <thead><tr><th class="no-print"></th><th>Date</th>${showProj ? '<th>Project</th>' : ''}<th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th><th class="no-print"></th></tr></thead>
+      <tbody>${list.map(o => { const isOff = !!off[o.id]; return `<tr class="${isOff ? 'mat-off no-print' : ''}">
+        <td class="no-print"><input type="checkbox" data-ooff="${esc(o.id)}" ${isOff ? '' : 'checked'} aria-label="Include on this invoice"></td>
+        <td style="white-space:nowrap">${inp(o, 'date', 'date', `min="${state.inv.start}" max="${state.inv.end}"`)}<span class="print-only">${C.fmtDateNZ(o.date)}</span></td>
+        ${showProj ? `<td><select class="other-in no-print" data-o="${esc(o.id)}" data-of="project" aria-label="Project">${projs(o).map(p => `<option ${p === o.project ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select><span class="print-only">${esc(o.project)}</span></td>` : ''}
+        <td>${inp(o, 'description', 'text', 'placeholder="e.g. Soil lab analysis - 6 samples" style="width:100%"')}<span class="print-only">${esc(o.description) || '-'}</span></td>
+        <td class="num">${inp(o, 'qty', 'number', 'step="0.01" style="width:5.5em"')}<span class="print-only">${hrs(o.qty)}</span></td>
+        <td class="num">${inp(o, 'unit', 'number', 'step="0.01" style="width:7em"')}<span class="print-only">${money(+o.unit || 0)}</span></td>
+        <td class="num">${money(otherAmt(o))}</td>
+        <td class="no-print"><button class="btn btn-small btn-danger" type="button" data-odel="${esc(o.id)}" aria-label="Delete item">&times;</button></td></tr>`; }).join('')}</tbody>
+      <tfoot><tr><td class="no-print"></td><td colspan="${showProj ? 4 : 3}">Total other</td><td></td><td class="num">${money(inc.reduce((a, o) => a + otherAmt(o), 0))}</td><td class="no-print"></td></tr></tfoot>
+    </table></div><p class="note no-print">Untick an item to hold it for a later invoice. Delete removes it for good.</p></div>`;
+  }
   function firstProjectFor(client, start, end) {
     const m = new Map();
     for (const r of state.data.rows) if (r.client === client && r.date >= start && r.date <= end) m.set(r.project, (m.get(r.project) || 0) + r.amount + r.kmAmt + 0.001);
@@ -733,7 +791,8 @@
       const desc = C.sfDescriptions(inv.days, allocFor);
       inv.lines.forEach(l => { if (l.kind === 'alloc' && l.auto) l.description = desc[l.cat]; });
     }
-    return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0 });
+    syncOtherLines();
+    return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0, others: Object.fromEntries(includedOthers().map(o => [o.id, o])) });
   }
 
   // Name shown for a project on schedules: its invoice heading from Setup (without {month}), else the timesheet code
@@ -758,7 +817,7 @@
     if (!projects || !projects.length) projects = client ? defaultProjects(client, start, end) : [];
     state.inv = { client, projects: projects || [], start, end, assign: {}, lines: null, meta: null };
     setScheduleType(state.inv);
-    state.inv.matOff = {};
+    state.inv.matOff = {}; state.inv.otherOff = {};
     rebuildInvoice(true);
   }
 
@@ -769,7 +828,7 @@
     const bill = p => { const b = billingFor(inv.client, p); return { ...b, header: (b.header || '').replace('{month}', monthTxt) }; };
     const firstProj = inv.days.find(x => x.hours)?.project || '*';
     inv.lines = inv.land ? C.landLines(inv.days, includedMats()) : inv.sf ? C.sfLines(inv.days, allocFor, bill(firstProj).header) : C.defaultLines(inv.days, bill, { consultant: state.settings.consultant });
-    inv.assign = {};
+    inv.assign = {}; inv.otherHeadOff = false;
     if (resetMeta || !inv.meta) {
       const projs = [...new Set(inv.days.map(x => x.project))];
       const b = bill(projs[0] || '*');
@@ -874,7 +933,7 @@
     const kmDays = inv.days.filter(x => x.kms);
     const labour = timeLines.concat(allocLines).reduce((a, l) => a + l.amount, 0);
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
-    const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
+    const other = comp.lines.filter(l => l.kind === 'manual' || l.kind === 'other').reduce((a, l) => a + l.amount, 0);
     const matAmt = comp.lines.filter(l => l.kind === 'mat').reduce((a, l) => a + l.amount, 0);
     const projTitle = (inv.projects.length ? inv.projects : [...new Set(workDays.map(x => x.project))]).map(projectLabel).join(', ');
     const lineLabel = l => `Line ${comp.lines.indexOf(l) + 1}`;
@@ -910,7 +969,7 @@
               <div><span>Labour</span><span>${money(labour)}</span></div>
               ${matAmt ? `<div><span>Materials</span><span>${money(matAmt)}</span></div>` : ''}
               ${vehicle ? `<div><span>Vehicle</span><span>${money(vehicle)}</span></div>` : ''}
-              ${other ? `<div><span>Other items</span><span>${money(other)}</span></div>` : ''}
+              ${other ? `<div><span>Other</span><span>${money(other)}</span></div>` : ''}
               <div><span>GST 15%</span><span>${money(comp.gst)}</span></div>
               <div class="grand"><span>Total NZD</span><span>${money(comp.total)}</span></div>
             </div>
@@ -957,11 +1016,12 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
                 <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${(() => { const tv = tripFor(x); return `<input type="text" class="trip-in no-print" data-trip="${esc(x.key)}" value="${esc(tv)}" aria-label="Trip ${C.fmtDateNZ(x.date)}"><span class="print-only">${esc(tv) || '-'}</span>`; })()}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total vehicle</td><td class="num">${kmDays.reduce((a, x) => a + x.kms, 0)}</td><td></td><td class="num">${money(kmDays.reduce((a, x) => a + x.kmAmt, 0))}</td></tr></tfoot>
               </table></div></div>` : ''}
+              ${otherTableHTML(inv.projects.length ? inv.projects : projList.map(x => x[0]))}
               <div class="doc-totals">
                 <div><span>Labour</span><span>${money(labour)}</span></div>
                 ${matAmt ? `<div><span>Materials</span><span>${money(matAmt)}</span></div>` : ''}
                 ${vehicle ? `<div><span>Vehicle</span><span>${money(vehicle)}</span></div>` : ''}
-                ${other ? `<div><span>Other items</span><span>${money(other)}</span></div>` : ''}
+                ${other ? `<div><span>Other</span><span>${money(other)}</span></div>` : ''}
                 <div><span>Subtotal (excl GST)</span><span>${money(comp.subtotal)}</span></div>
                 <div><span>GST 15%</span><span>${money(comp.gst)}</span></div>
                 <div class="grand"><span>Total (incl GST)</span><span>${money(comp.total)}</span></div>
@@ -985,11 +1045,11 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
             <div class="table-wrap"><table class="xero-lines">
               <thead><tr><th style="width:44%">Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Account</th><th>Tax rate</th><th class="num">Amount NZD</th><th></th></tr></thead>
               <tbody>${comp.lines.map((l, i) => `<tr class="${l.kind === 'heading' ? 'heading-row' : ''}">
-                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item', mat: 'Materials', alloc: { visits: 'Site visits', admin: 'Reporting-Admin', tech: 'Technical Support', p27: 'P27' }[l.cat] + (l.quantity ? '' : ' · no hours, left off the invoice') }[l.kind]}</div>
+                <td><div class="kind">${{ heading: 'Heading', time: 'Time' + (l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''), vehicle: 'Vehicle', manual: 'Item', other: 'Other' + (l.project ? ' · ' + esc(l.project) : ''), mat: 'Materials', alloc: { visits: 'Site visits', admin: 'Reporting-Admin', tech: 'Technical Support', p27: 'P27' }[l.cat] + (l.quantity ? '' : ' · no hours, left off the invoice') }[l.kind]}</div>
                   <textarea rows="${l.kind === 'heading' ? 3 : 2}" data-desc="${i}" aria-label="Description line ${i + 1}">${esc(l.description)}</textarea></td>
                 ${l.kind === 'heading' ? '<td colspan="5" class="muted" style="font-size:.8rem">Description only</td>' : `
-                <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : hrs(l.quantity)}</td>
-                <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : (l.kind === 'time' || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
+                <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="qty" value="${l.quantity}" aria-label="Quantity">` : hrs(l.quantity)}</td>
+                <td class="num">${l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="unit" value="${l.unitAmount}" aria-label="Unit price">` : l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : (l.kind === 'time' || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
                 <td>${esc(state.settings.accountCode)} Sales</td><td>15% GST on Income</td>
                 <td class="num">${money(l.amount)}</td>`}
                 <td><button class="btn-danger btn" data-del="${i}" aria-label="Remove line ${i + 1}">&times;</button></td>
@@ -1026,7 +1086,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     $$('.proj-cb', el).forEach(cb => cb.onchange = () => {
       const all = $$('.proj-cb', el); const on = all.filter(x => x.checked).map(x => x.value);
       inv.projects = on.length === all.length ? [] : on; if (!on.length) { cb.checked = true; return; }
-      setScheduleType(inv); inv.matOff = {};
+      setScheduleType(inv); inv.matOff = {}; inv.otherOff = {};
       rebuildInvoice(true); rerender();
     });
     $$('.line-sel', el).forEach(s => s.onchange = () => { inv.assign[s.dataset.day] = +s.value; rerender(); });
@@ -1051,6 +1111,22 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     });
     $('#iSF').onchange = e => { inv.sf = e.target.checked; if (inv.sf) inv.land = false; rebuildInvoice(false); rerender(); };
     $('#iLand').onchange = e => { inv.land = e.target.checked; if (inv.land) inv.sf = false; inv.matOff = {}; rebuildInvoice(false); rerender(); };
+    const keepScroll = () => { const y = window.scrollY; rerender(); window.scrollTo({ top: y }); };
+    $$('[data-of]', el).forEach(inp => inp.onchange = () => { setOther(inp.dataset.o, inp.dataset.of, inp.value); keepScroll(); });
+    $$('[data-ooff]', el).forEach(cb => cb.onchange = () => { inv.otherOff[cb.dataset.ooff] = !cb.checked; keepScroll(); });
+    $$('[data-odel]', el).forEach(b => b.onclick = () => {
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Confirm'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.innerHTML = '&times;'; } }, 4000); return; }
+      state.config.otherItems = (state.config.otherItems || []).filter(o => o.id !== b.dataset.odel);
+      saveSettings(); keepScroll(); toast('Item deleted');
+    });
+    $('#addOther')?.addEventListener('click', () => {
+      if (!inv.client) { toast('Choose a client first.'); return; }
+      const choices = inv.projects.length ? inv.projects : projList.map(x => x[0]);
+      const o = { id: C.uid(), client: inv.client, project: choices[0] || '', date: inv.end, description: '', qty: 1, unit: 0, invoice: '' };
+      state.config.otherItems = state.config.otherItems || [];
+      state.config.otherItems.push(o); saveSettings(); keepScroll();
+      $(`[data-o="${o.id}"][data-of="description"]`, el)?.focus();
+    });
     $$('[data-matoff]', el).forEach(cb => cb.onchange = () => { inv.matOff[cb.dataset.matoff] = !cb.checked; ensureMatLine(); const y = window.scrollY; rerender(); window.scrollTo({ top: y }); });
     $$('[data-alloc]', el).forEach(inp => inp.onchange = () => {
       const d = inv.days.find(x => x.key === inp.dataset.alloc); if (!d) return;
@@ -1072,12 +1148,12 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       rerender();
     }; };
     metaInput('#mContact', 'contactName'); metaInput('#mNumber', 'number'); metaInput('#mRef', 'reference'); metaInput('#mDate', 'date'); metaInput('#mDue', 'due');
-    $$('[data-desc]', el).forEach(t => t.oninput = () => { const l = inv.lines[+t.dataset.desc]; l.description = t.value; l.auto = false; });
+    $$('[data-desc]', el).forEach(t => t.oninput = () => { const l = inv.lines[+t.dataset.desc]; l.description = t.value; l.auto = false; if (l.kind === 'other') { const o = findOther(l.itemId); if (o) { o.description = t.value; saveSettings(); } } });
     $$('[data-desc]', el).forEach(t => t.onchange = rerender);
     $$('[data-rate]', el).forEach(t => t.onchange = () => { const l = inv.lines[+t.dataset.rate]; const v = parseFloat(t.value); l.manualRate = isFinite(v) && v > 0 ? v : null; rerender(); });
     $$('[data-qty]', el).forEach(t => t.onchange = () => { inv.lines[+t.dataset.qty].quantity0 = t.value; rerender(); });
     $$('[data-unit]', el).forEach(t => t.onchange = () => { inv.lines[+t.dataset.unit].unitAmount0 = t.value; rerender(); });
-    $$('[data-del]', el).forEach(b => b.onclick = () => { const i = +b.dataset.del; const l = inv.lines[i]; inv.lines.splice(i, 1); for (const k in inv.assign) if (inv.assign[k] === l.id) delete inv.assign[k]; rerender(); });
+    $$('[data-del]', el).forEach(b => b.onclick = () => { const i = +b.dataset.del; const l = inv.lines[i]; if (l.kind === 'other') inv.otherOff[l.itemId] = true; if (l.otherHead) inv.otherHeadOff = true; inv.lines.splice(i, 1); for (const k in inv.assign) if (inv.assign[k] === l.id) delete inv.assign[k]; rerender(); });
     $$('[data-add]', el).forEach(b => b.onclick = () => {
       const id = Math.max(0, ...inv.lines.map(l => l.id)) + 1; const kind = b.dataset.add;
       const first = workDays[0], last = workDays[workDays.length - 1];
@@ -1121,6 +1197,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const n = (number || inv.meta.number || '').match(/^(.*?)(\d+)$/);
     if (n && (number || inv.meta.number) === state.settings.nextInvoiceNumber) state.settings.nextInvoiceNumber = n[1] + String(+n[2] + 1).padStart(n[2].length, '0');
     if (inv.land) { const num = number || inv.meta.number || 'invoiced'; includedMats().forEach(m => { m.invoice = num; }); }
+    { const num = number || inv.meta.number || 'invoiced'; includedOthers().forEach(o => { o.invoice = num; }); }
     saveSettings();
   }
 
@@ -1273,12 +1350,28 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       y = doc.lastAutoTable.finalY + 8;
     }
 
+    const others = includedOthers();
+    if (others.length) {
+      if (y > 250) { doc.addPage(); y = 18; }
+      const op = new Set(others.map(o => o.project)).size > 1 || multiProj;
+      doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Other', M, y); y += 2;
+      const oo = op ? 1 : 0;
+      doc.autoTable({ ...base, startY: y,
+        head: [['Date', ...(op ? ['Project'] : []), 'Description', 'Qty', 'Unit price', 'Amount']],
+        body: others.map(o => [C.fmtDateNZ(o.date), ...(op ? [o.project] : []), o.description || '-', hrs(o.qty), money(+o.unit || 0), money(otherAmt(o))]),
+        foot: [['Total other', ...(op ? [''] : []), '', '', '', money(others.reduce((a, o) => a + otherAmt(o), 0))]],
+        columnStyles: { 0: { cellWidth: 20 }, [2 + oo]: { cellWidth: 14, halign: 'right' }, [3 + oo]: { cellWidth: 22, halign: 'right' }, [4 + oo]: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 2 + oo) c.cell.styles.halign = 'right'; }
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    }
+
     // totals block
     const labour = comp.lines.filter(l => l.kind === 'time' || l.kind === 'alloc').reduce((a, l) => a + l.amount, 0);
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
-    const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
+    const other = comp.lines.filter(l => l.kind === 'manual' || l.kind === 'other').reduce((a, l) => a + l.amount, 0);
     const matAmtP = comp.lines.filter(l => l.kind === 'mat').reduce((a, l) => a + l.amount, 0);
-    const rows = [...(labour || !matAmtP ? [['Labour', money(labour)]] : []), ...(matAmtP ? [['Materials', money(matAmtP)]] : []), ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other items', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
+    const rows = [...(labour || !matAmtP ? [['Labour', money(labour)]] : []), ...(matAmtP ? [['Materials', money(matAmtP)]] : []), ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
     if (y > 245) { doc.addPage(); y = 20; }
     const x0 = W - M - 80;
     doc.setFontSize(9); doc.setFont(F, 'normal'); doc.setTextColor(...ink);

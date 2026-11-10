@@ -356,6 +356,11 @@
       const kms = days.reduce((s, d) => s + d.kms, 0), amt = days.reduce((s, d) => s + d.kmAmt, 0);
       veh.quantity = kms; veh.unitAmount = kms ? round2(amt / kms) : 0; veh.amount = round2(veh.quantity * veh.unitAmount);
     }
+    // Other (non-labour) project items: quantity and unit price come from the stored item
+    for (const l of out.filter(l => l.kind === 'other')) {
+      const it = (ctx.others || {})[l.itemId] || {};
+      l.quantity = num(it.qty); l.unitAmount = num(it.unit); l.amount = round2(l.quantity * l.unitAmount);
+    }
     for (const l of out.filter(l => l.kind === 'manual')) {
       l.quantity = num(l.quantity0); l.unitAmount = num(l.unitAmount0); l.amount = round2(l.quantity * l.unitAmount);
     }
