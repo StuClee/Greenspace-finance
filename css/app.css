@@ -250,6 +250,21 @@ body[data-view="invoicing"] .wrap, body[data-view="invoicing"] .topbar-inner { m
 .paper table:not(.sf-table) .alloc-in { width: 5em; }
 .pdf-mode .act-in { display: none; }
 
+/* daily plan */
+.planner { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+.pl-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.pl-head { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; text-align: center; }
+.pl-cell { border: 1px solid var(--line); border-radius: 6px; padding: 6px; display: grid; gap: 4px; background: var(--surface); min-width: 0; }
+.pl-cell select { width: 100%; font-size: .8rem; padding: 3px 4px; }
+.pl-empty { border: 0; background: transparent; }
+.pl-we { background: var(--surface-2); }
+.pl-off .pl-amt { color: var(--muted); }
+.pl-top { display: flex; justify-content: space-between; gap: 4px; min-width: 0; }
+.pl-d { font-weight: 700; font-size: .8rem; white-space: nowrap; }
+.pl-hol { font-size: .66rem; color: var(--soil); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-amt { font-variant-numeric: tabular-nums; font-weight: 600; font-size: .9rem; text-align: right; }
+@media (max-width: 700px) { .pl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pl-head, .pl-empty { display: none; } }
+
 /* materials */
 .mat-table input, .mat-table select { width: 100%; min-width: 4.5em; font-size: .85rem; padding: 5px 6px; }
 .mat-table td { white-space: nowrap; }
