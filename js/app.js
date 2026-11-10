@@ -568,7 +568,12 @@
               <td>${[...x.clients.entries()].sort((a, b) => b[1] - a[1]).map(([c, h]) => `${esc(c)} <span class="muted">${hrs(h)}</span>`).join(', ')}</td>
               <td class="num">${x.kms || ''}</td></tr>`;
           }).join('') || '<tr><td colspan="6" class="muted">No entries.</td></tr>'}</tbody>
-          <tfoot><tr><td>Total</td><td class="num">${hrs(days.reduce((a, x) => a + x.hours, 0))}</td><td class="num">${money(days.reduce((a, x) => a + x.amount, 0))}</td><td></td><td></td><td class="num">${days.reduce((a, x) => a + x.kms, 0) || ''}</td></tr></tfoot>
+          <tfoot><tr><td>Total</td><td class="num">${hrs(days.reduce((a, x) => a + x.hours, 0))}</td><td class="num">${money(days.reduce((a, x) => a + x.amount, 0))}</td>${(() => {
+            const ms = C.monthStats(d, tm, todayISO()), isPast = C.monthEnd(tm) < todayISO();
+            const tgt = isPast ? ms.target : ms.targetToDate, v = ms.revenue - tgt;
+            if (!tgt) return '<td></td>';
+            return `<td class="num" style="color:${v >= 0 ? 'var(--good)' : 'var(--bad)'}" title="${isPast ? 'Month' : 'Month to date'}: ${money0(ms.revenue)} against a target of ${money0(tgt)}">${v >= 0 ? '+' : ''}${money0(v)}<div class="muted" style="font-size:.72rem;font-weight:400">${isPast ? 'month' : 'to date'}</div></td>`;
+          })()}<td></td><td class="num">${days.reduce((a, x) => a + x.kms, 0) || ''}</td></tr></tfoot>
         </table></div>
       </div>`;
 
