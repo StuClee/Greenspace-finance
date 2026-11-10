@@ -296,3 +296,9 @@ tr.mat-off td { opacity: .45; }
   tr { break-inside: avoid; }
 }
 .pdf-mode .no-print { display: none !important; }
+
+/* Other (non-labour) items on the schedule */
+.other-table input, .other-table select { font-size: .85rem; padding: 4px 6px; }
+.other-table input[type=number] { text-align: right; }
+.other-table td { vertical-align: middle; }
+.xero-lines input.other-in { width: 7.5em; text-align: right; }
