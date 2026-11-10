@@ -91,10 +91,10 @@
   function applyConfig(cfg) {
     state.config = normaliseConfig(cfg);
     state.settings = state.config.settings;
-    if (state.data) { state.data.targets = state.config.targets; state.data.projects = state.config.projects; state.data.mileageRate = state.config.mileageRate; }
+    if (state.data) { state.data.targets = effectiveTargets(); state.data.projects = state.config.projects; state.data.mileageRate = state.config.mileageRate; }
   }
   function setRows(rows) {
-    state.data = { rows: rows.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), targets: state.config.targets, projects: state.config.projects, mileageRate: state.config.mileageRate, fromDate: state.settings.fromDate };
+    state.data = { rows: rows.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), targets: effectiveTargets(), projects: state.config.projects, mileageRate: state.config.mileageRate, fromDate: state.settings.fromDate };
   }
 
   // ---------- save status ----------
@@ -223,6 +223,24 @@
     return p[client + '|' + project] || p[client + '|*'] || { contact: client, reference: '', header: '', due: '20th' };
   }
   const isBillable = client => client && !state.settings.nonBillable.includes(client);
+  // Monthly target days: Working days (weekdays) less Stats, Sick and Annual Leave = Net working days
+  function targetParts(mk) {
+    const t = state.config.targets[mk] || {};
+    const wd = C.weekdaysIn(mk);
+    const has = 'stats' in t || 'sick' in t || 'leave' in t;
+    const hols = C.holidaysIn(mk);
+    const stats = has ? (+t.stats || 0) : hols.length;
+    // months set up from the workbook before these columns existed: any further gap was leave
+    const leave = has ? (+t.leave || 0) : (mk <= '2026-12' && t.targetDays ? Math.max(0, wd - stats - t.targetDays) : 0);
+    const sick = +t.sick || 0;
+    return { target: +t.target || 0, wd, stats, sick, leave, hols, net: Math.max(0, wd - stats - sick - leave) };
+  }
+  // Targets as used by the Dashboard and Timesheet: targetDays = net working days
+  function effectiveTargets() {
+    const out = {};
+    for (const mk of Object.keys(state.config.targets || {})) { const x = targetParts(mk); out[mk] = { target: x.target, targetDays: x.net }; }
+    return out;
+  }
   function monthTargetPerDay(mk) {
     const t = state.data.targets[mk];
     return t && t.target ? t.target / (t.targetDays || 21) : 0;
@@ -1496,15 +1514,17 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
           <datalist id="clientCodes">${clientsList().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
         </div>
 
-        <div class="panel">
-          <div class="panel-head"><h2>Monthly targets</h2><span class="note">Used on the Dashboard and the daily target</span></div>
+        <div class="panel" style="grid-column:1 / -1">
+          <div class="panel-head"><h2>Monthly targets</h2><span class="note">Working days are the weekdays in the month. Net working days set the daily target.</span></div>
           <div class="table-wrap" style="max-height:520px;overflow:auto"><table class="setup-table">
-            <thead><tr><th>Month</th><th class="num">Target $</th><th class="num">Working days</th><th class="num">$ per day</th></tr></thead>
-            <tbody>${tMonths.map(m => { const x = cfg.targets[m] || {}; return `<tr>
+            <thead><tr><th>Month</th><th class="num">Target $</th><th class="num">Working days</th><th class="num">Stats</th><th class="num">Sick</th><th class="num">Annual Leave</th><th class="num">Net working days</th><th class="num">$ per day</th></tr></thead>
+            <tbody>${tMonths.map(m => { const x = targetParts(m); const day = (f, v, l) => `<td><input type="number" min="0" step="0.5" data-tg="${m}" data-f="${f}" value="${v || ''}" placeholder="0" style="text-align:right;width:4.5em" aria-label="${l} in ${C.monthLabel(m)}"></td>`; return `<tr>
               <td class="key">${C.monthLabel(m)}</td>
-              <td><input type="number" min="0" step="100" data-tg="${m}" data-f="target" value="${x.target ?? ''}" style="text-align:right" aria-label="Target for ${C.monthLabel(m)}"></td>
-              <td><input type="number" min="0" step="1" data-tg="${m}" data-f="targetDays" value="${x.targetDays ?? ''}" style="text-align:right" aria-label="Working days in ${C.monthLabel(m)}"></td>
-              <td class="num muted">${x.target && x.targetDays ? money0(x.target / x.targetDays) : ''}</td></tr>`; }).join('')}</tbody>
+              <td><input type="number" min="0" step="100" data-tg="${m}" data-f="target" value="${x.target || ''}" style="text-align:right" aria-label="Target for ${C.monthLabel(m)}"></td>
+              <td class="num">${x.wd}</td>
+              ${day('stats', x.stats, 'Stat days').replace('<td>', `<td title="${esc(x.hols.map(h => C.fmtDateNZ(h.date) + ' ' + h.name).join('\n') || 'No public holidays on weekdays')}">`)}${day('sick', x.sick, 'Sick days')}${day('leave', x.leave, 'Annual leave days')}
+              <td class="num"><strong>${hrs(x.net)}</strong></td>
+              <td class="num">${x.target && x.net ? money0(x.target / x.net) : ''}</td></tr>`; }).join('')}</tbody>
           </table></div>
           <label class="field" style="margin-top:12px;max-width:220px"><span>Mileage rate $/km</span><input type="number" min="0" step="0.01" id="sMileage" value="${cfg.mileageRate}"></label>
         </div>
@@ -1565,8 +1585,12 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       saved(); renderSetup(el); toast(`Added ${client} | ${project}`);
     };
     $$('[data-tg]', el).forEach(inp => inp.onchange = () => {
-      const m = inp.dataset.tg; cfg.targets[m] = Object.assign({ target: 0, targetDays: 21 }, cfg.targets[m]);
-      cfg.targets[m][inp.dataset.f] = +inp.value || 0; saved(); renderSetup(el);
+      const m = inp.dataset.tg, cur = targetParts(m);
+      const t = cfg.targets[m] = Object.assign({}, cfg.targets[m], { stats: cur.stats, sick: cur.sick, leave: cur.leave });
+      t[inp.dataset.f] = +inp.value || 0;
+      t.targetDays = targetParts(m).net; // net working days drive the daily target everywhere
+      state.data.targets = effectiveTargets();
+      saved(); renderSetup(el); toast('Saved');
     });
     $('#sMileage').onchange = e => { cfg.mileageRate = +e.target.value || 0.8; state.data.mileageRate = cfg.mileageRate; saved(); toast('Saved'); };
     $$('tr[data-key] [data-f]', el).forEach(inp => inp.onchange = () => {

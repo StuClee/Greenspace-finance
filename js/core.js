@@ -415,13 +415,15 @@
     // Weekday-based target pacing
     const start = monthStart(mk), end = monthEnd(mk);
     const weekdays = []; for (let d = start; d <= end; d = addDays(d, 1)) if (weekday(d) % 6 !== 0) weekdays.push(d);
-    const perDay = weekdays.length ? target / weekdays.length : 0;
+    // daily target = target / net working days; the running target stops at the month target
+    const netDays = t.targetDays || weekdays.length;
+    const perDay = netDays ? target / netDays : 0;
     const daily = [];
     let cumA = 0, cumT = 0;
     for (let d = start; d <= end; d = addDays(d, 1)) {
       const a = round2(work.filter(r => r.date === d).reduce((s, r) => s + r.amount, 0));
       const hrs = work.filter(r => r.date === d).reduce((s, r) => s + r.hours, 0);
-      cumA += a; if (weekday(d) % 6 !== 0) cumT += perDay;
+      cumA += a; if (weekday(d) % 6 !== 0) cumT = Math.min(target, cumT + perDay);
       daily.push({ date: d, actual: a, hours: hrs, cumActual: round2(cumA), cumTarget: round2(cumT), future: today && d > today });
     }
     const asOf = today && today < end ? (today < start ? start : today) : end;
@@ -438,11 +440,23 @@
     return { mk, revenue, hours, kms, mileage, daysWorked, target, targetDays: t.targetDays || weekdays.length, targetToDate, daily, categories: Object.fromEntries(cat), categoryHours: Object.fromEntries(catH), projects };
   }
 
+  // NZ public holidays on weekdays (Auckland), including Mondayised days. Used to pre-fill Stats.
+  const NZ_HOLIDAYS = {
+    '2026-10-26': 'Labour Day', '2026-12-25': 'Christmas Day', '2026-12-28': 'Boxing Day (observed)',
+    '2027-01-01': "New Year's Day", '2027-01-04': "Day after New Year's (observed)", '2027-02-01': 'Auckland Anniversary', '2027-02-08': 'Waitangi Day (observed)',
+    '2027-03-26': 'Good Friday', '2027-03-29': 'Easter Monday', '2027-04-26': 'Anzac Day (observed)', '2027-06-07': "King's Birthday", '2027-06-25': 'Matariki',
+    '2027-10-25': 'Labour Day', '2027-12-27': 'Christmas Day (observed)', '2027-12-28': 'Boxing Day (observed)'
+  };
+  const holidaysIn = mk => Object.keys(NZ_HOLIDAYS).filter(d => d.startsWith(mk)).map(d => ({ date: d, name: NZ_HOLIDAYS[d] }));
+  function weekdaysIn(mk) {
+    let n = 0; for (let d = monthStart(mk); d <= monthEnd(mk); d = addDays(d, 1)) if (weekday(d) % 6 !== 0) n++;
+    return n;
+  }
   function monthsInData(data) {
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { holidaysIn, NZ_HOLIDAYS, weekdaysIn, matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);
