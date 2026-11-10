@@ -1223,7 +1223,16 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
   }
   async function downloadPDF() {
     if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Use Print and choose Save as PDF instead.'); return; }
-    try { buildSchedulePDF().save(pdfName()); toast('PDF downloaded'); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message); }
+    // Open the PDF in a new tab first (opened inside the click so pop-up blockers allow it), then save a copy to Downloads
+    const win = window.open('', '_blank');
+    try {
+      const doc = buildSchedulePDF(), name = pdfName();
+      const url = URL.createObjectURL(doc.output('blob'));
+      if (win) { win.location.href = url; } 
+      doc.save(name);
+      toast(`Saved to your Downloads folder as "${name}"${win ? ' and opened in a new tab' : ''}`, 6000);
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { if (win) win.close(); console.error(e); toast('Could not build the PDF: ' + e.message, 6000); }
   }
   async function pdfBase64() {
     return buildSchedulePDF().output('datauristring').split(',')[1];
