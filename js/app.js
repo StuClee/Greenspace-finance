@@ -1105,11 +1105,45 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const m = state.inv.meta; const [y, mo] = state.inv.end.split('-');
     return `Schedule ${m.number ? m.number + ' ' : ''}${m.contactName} ${C.MONTHS[+mo - 1]} ${y}.pdf`.replace(/[\\/:*?"<>|]/g, '');
   }
+  // ----- PDF font: Source Sans 3 (handles macrons such as Tātaki). Built-in Helvetica cannot. -----
+  const PDF_FONTS = { regular: null, bold: null };
+  async function loadPdfFonts() {
+    const files = { regular: 'SourceSans3_400Regular.ttf', bold: 'SourceSans3_700Bold.ttf' };
+    const cdn = { regular: 'https://cdn.jsdelivr.net/npm/@expo-google-fonts/source-sans-3@0.4.2/400Regular/SourceSans3_400Regular.ttf', bold: 'https://cdn.jsdelivr.net/npm/@expo-google-fonts/source-sans-3@0.4.2/700Bold/SourceSans3_700Bold.ttf' };
+    for (const k of ['regular', 'bold']) {
+      if (PDF_FONTS[k]) continue;
+      for (const url of ['fonts/' + files[k], cdn[k]]) {
+        try {
+          const r = await fetch(url); if (!r.ok) continue;
+          const buf = new Uint8Array(await r.arrayBuffer()); let bin = '';
+          for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+          PDF_FONTS[k] = btoa(bin); break;
+        } catch { /* try next */ }
+      }
+    }
+  }
+  loadPdfFonts();
+  // Register the font on a document; returns the font name to use. Falls back to Helvetica without macrons.
+  function pdfFont(doc) {
+    if (PDF_FONTS.regular && PDF_FONTS.bold) {
+      doc.addFileToVFS('SS3-Regular.ttf', PDF_FONTS.regular); doc.addFont('SS3-Regular.ttf', 'SS3', 'normal');
+      doc.addFileToVFS('SS3-Bold.ttf', PDF_FONTS.bold); doc.addFont('SS3-Bold.ttf', 'SS3', 'bold');
+      return 'SS3';
+    }
+    return 'helvetica';
+  }
+
   // ----- Schedule of Hours PDF (built directly with jsPDF + AutoTable: real text, clean page breaks) -----
   function buildSchedulePDF() {
     const { jsPDF } = window.jspdf;
     const inv = state.inv, m = inv.meta, comp = computeInv();
     const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    const F = pdfFont(doc);
+    if (F === 'helvetica') { // strip macrons so the built-in font does not garble the text
+      const plain = t => typeof t === 'string' ? t.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : t;
+      const ot = doc.text.bind(doc); doc.text = (t, ...a) => ot(Array.isArray(t) ? t.map(plain) : plain(t), ...a);
+      const os = doc.splitTextToSize.bind(doc); doc.splitTextToSize = (t, ...a) => os(plain(t), ...a);
+    }
     const W = doc.internal.pageSize.getWidth(), M = 14;
     const green = [44, 106, 68], ink = [27, 36, 30], grey = [93, 106, 97], line = [217, 224, 215];
     const workDays = inv.days.filter(x => x.hours), kmDays = inv.days.filter(x => x.kms);
@@ -1118,32 +1152,37 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const n = v => (+v || 0), h = v => n(v) ? hrs(n(v)) : '';
 
     // header
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(...green);
+    doc.setFont(F, 'bold'); doc.setFontSize(15); doc.setTextColor(...green);
     doc.text('Greenspace Consulting Limited', M, 18);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
+    doc.setFont(F, 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
     doc.text('stu@greenspaceconsulting.co.nz', M, 23);
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...ink);
+    doc.setFont(F, 'bold'); doc.setFontSize(13); doc.setTextColor(...ink);
     doc.text('Schedule of Hours', W - M, 18, { align: 'right' });
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
+    doc.setFont(F, 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
     doc.text('Supporting document' + (m.number ? ' for invoice ' + m.number : ''), W - M, 23, { align: 'right' });
     doc.setDrawColor(...green); doc.setLineWidth(0.8); doc.line(M, 27, W - M, 27);
-    // meta
-    const meta = [['Client', m.contactName], ['Project', projTitle], ['Period', `${C.fmtDateNZ(inv.start)} to ${C.fmtDateNZ(inv.end)}`], ['Reference', m.reference || '-'], ['Consultant', state.settings.consultant]];
+    // meta: row 1 Client / Period / Reference; row 2 Project (two columns wide, wraps) / Consultant
     const colW = (W - 2 * M) / 3;
-    meta.forEach(([k, v], i) => {
-      const x = M + (i % 3) * colW, y = 34 + Math.floor(i / 3) * 11;
-      doc.setFontSize(7); doc.setTextColor(...grey); doc.setFont('helvetica', 'bold'); doc.text(k.toUpperCase(), x, y);
-      doc.setFontSize(9.5); doc.setTextColor(...ink); doc.setFont('helvetica', 'normal'); doc.text(doc.splitTextToSize(String(v || ''), colW - 4)[0] || '', x, y + 4.5);
-    });
+    const cell = (k, v, x, y, w) => {
+      doc.setFontSize(7); doc.setTextColor(...grey); doc.setFont(F, 'bold'); doc.text(k.toUpperCase(), x, y);
+      doc.setFontSize(9.5); doc.setTextColor(...ink); doc.setFont(F, 'normal');
+      const lines = doc.splitTextToSize(String(v || '-'), w - 4).slice(0, 3);
+      doc.text(lines, x, y + 4.5); return lines.length;
+    };
+    let my = 34;
+    const r1 = Math.max(cell('Client', m.contactName, M, my, colW), cell('Period', `${C.fmtDateNZ(inv.start)} to ${C.fmtDateNZ(inv.end)}`, M + colW, my, colW), cell('Reference', m.reference || '-', M + 2 * colW, my, colW));
+    my += 7 + r1 * 4.2;
+    const r2 = Math.max(cell('Project', projTitle, M, my, 2 * colW), cell('Consultant', state.settings.consultant, M + 2 * colW, my, colW));
+    my += 7 + r2 * 4.2;
 
     const base = {
       theme: 'plain', margin: { left: M, right: M, top: 16, bottom: 16 },
-      styles: { font: 'helvetica', fontSize: 8, textColor: ink, cellPadding: { top: 1.6, bottom: 1.6, left: 1.5, right: 1.5 }, lineColor: line, lineWidth: { bottom: 0.2 }, valign: 'top' },
+      styles: { font: F, fontSize: 8, textColor: ink, cellPadding: { top: 1.6, bottom: 1.6, left: 1.5, right: 1.5 }, lineColor: line, lineWidth: { bottom: 0.2 }, valign: 'top' },
       headStyles: { fontSize: 6.8, fontStyle: 'bold', textColor: grey, lineWidth: { bottom: 0.4 }, valign: 'bottom' },
       footStyles: { fontStyle: 'bold', lineWidth: { top: 0.5 }, lineColor: line },
       rowPageBreak: 'avoid', showHead: 'everyPage'
     };
-    let y = 34 + 2 * 11 + 2;
+    let y = my + 1;
 
     if (inv.sf) {
       const rate = workDays.find(d => d.rate)?.rate || 0;
@@ -1155,7 +1194,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       });
       const tc = Math.round((t.total - t.adj) * 100) / 100;
       doc.autoTable({ ...base, startY: y,
-        head: [['Date', 'Activities', 'Total Hours', 'Visits', 'No of Visits', 'P27', 'Reporting-Admin', 'Technical Support', 'Total', 'Check']],
+        head: [['Date', 'Activities', 'Total\nHours', 'Visits', 'No of\nVisits', 'P27', 'Reporting-\nAdmin', 'Technical\nSupport', 'Total', 'Check']],
         body,
         foot: [
           ['Total hours', '', hrs(t.adj), hrs(t.visits), String(t.nv), hrs(t.p27), hrs(t.admin), hrs(t.tech), hrs(t.total), tc ? hrs(tc) : '0'],
@@ -1183,7 +1222,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const mats = inv.land ? includedMats() : [];
     if (mats.length) {
       if (y > 250) { doc.addPage(); y = 18; }
-      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Materials', M, y); y += 2;
+      doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Materials', M, y); y += 2;
       doc.autoTable({ ...base, startY: y,
         head: [['Month', 'Item', 'Supplier', 'Unit', 'Qty', 'Unit price', 'Amount']],
         body: mats.map(mm => { const c = C.matCalc(mm); return [C.MONTHS[+mm.date.slice(5, 7) - 1], mm.item, mm.supplier, mm.unit, hrs(mm.qty), money(c.unitPrice), money(c.total)]; }),
@@ -1195,7 +1234,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     }
     if (kmDays.length) {
       if (y > 250) { doc.addPage(); y = 18; }
-      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Vehicle', M, y); y += 2;
+      doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Vehicle', M, y); y += 2;
       doc.autoTable({ ...base, startY: y,
         head: [['Date', ...(multiProj ? ['Project'] : []), 'Trip', 'Km', 'Rate', 'Amount']],
         body: kmDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), tripFor(d) || '-', String(d.kms), money(d.kms ? d.kmAmt / d.kms : 0), money(d.kmAmt)]),
@@ -1214,16 +1253,16 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const rows = [...(labour || !matAmtP ? [['Labour', money(labour)]] : []), ...(matAmtP ? [['Materials', money(matAmtP)]] : []), ...(vehicle ? [['Vehicle', money(vehicle)]] : []), ...(other ? [['Other items', money(other)]] : []), ['Subtotal (excl GST)', money(comp.subtotal)], ['GST 15%', money(comp.gst)]];
     if (y > 245) { doc.addPage(); y = 20; }
     const x0 = W - M - 80;
-    doc.setFontSize(9); doc.setFont('helvetica', 'normal'); doc.setTextColor(...ink);
+    doc.setFontSize(9); doc.setFont(F, 'normal'); doc.setTextColor(...ink);
     rows.forEach(([k, v]) => { doc.text(k, x0, y); doc.text(v, W - M, y, { align: 'right' }); y += 5.5; });
     doc.setDrawColor(...ink); doc.setLineWidth(0.5); doc.line(x0, y - 2.5, W - M, y - 2.5); y += 3;
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+    doc.setFont(F, 'bold'); doc.setFontSize(11);
     doc.text('Total (incl GST)', x0, y); doc.text(money(comp.total), W - M, y, { align: 'right' });
 
     // footer on every page
     const pages = doc.getNumberOfPages();
     for (let i = 1; i <= pages; i++) {
-      doc.setPage(i); doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...grey);
+      doc.setPage(i); doc.setFont(F, 'normal'); doc.setFontSize(7.5); doc.setTextColor(...grey);
       doc.text('Prepared from the Greenspace Consulting timesheet. Times are recorded in 15-minute units.', M, 289);
       doc.text(`Page ${i} of ${pages}`, W - M, 289, { align: 'right' });
     }
