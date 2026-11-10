@@ -302,3 +302,11 @@ tr.mat-off td { opacity: .45; }
 .other-table input[type=number] { text-align: right; }
 .other-table td { vertical-align: middle; }
 .xero-lines input.other-in { width: 7.5em; text-align: right; }
+
+/* Update an existing Xero invoice */
+.xero-update { margin: 12px 0 14px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 10px; }
+.xero-find { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.xero-find .field { flex: 1 1 220px; margin: 0; }
+.xero-target { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.xero-target.locked { background: color-mix(in srgb, var(--bad, #b3412f) 9%, transparent); }
+.xero-target .note { margin: 6px 0; }
