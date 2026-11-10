@@ -1223,20 +1223,13 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     }
     return doc;
   }
-  // Save: lets you pick the folder and file name (Chrome / Edge "Save as" window); other browsers save to Downloads
+  // Save: a normal browser download. Turn on Chrome's "Ask where to save each file" to choose the folder each time.
   async function downloadPDF() {
     if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Reload the page and try again.'); return; }
     let doc, name;
     try { doc = buildSchedulePDF(); name = pdfName(); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message, 6000); return; }
-    if (window.showSaveFilePicker) {
-      try {
-        const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }] });
-        const w = await handle.createWritable(); await w.write(doc.output('blob')); await w.close();
-        toast(`Saved "${handle.name}"`, 5000); return;
-      } catch (e) { if (e && e.name === 'AbortError') return; console.warn('Save window not available, saving to Downloads', e); }
-    }
     doc.save(name);
-    toast(`Saved to your Downloads folder as "${name}"`, 6000);
+    toast(`Downloaded "${name}". It is in your Downloads folder (Ctrl + J shows it), unless Chrome asks where to save.`, 7000);
   }
   // Open: shows the PDF in a new tab to read or print (the tab keeps working, including its own save button)
   function openPDF() {
