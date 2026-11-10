@@ -380,7 +380,7 @@
   function xeroPayload(inv, computed, opts = {}) {
     const items = computed.lines.filter(l => l.kind === 'heading' ? l.description : (l.quantity || l.amount)).map(l => {
       if (l.kind === 'heading') return { Description: l.description };
-      return { Description: l.description, Quantity: round2(l.quantity), UnitAmount: l.unitAmount, AccountCode: opts.accountCode || '200', TaxType: opts.taxType || 'OUTPUT2' };
+      return { Description: l.description, Quantity: round2(l.quantity), UnitAmount: l.unitAmount, AccountCode: l.accountCode || opts.accountCode || '200', TaxType: l.taxType || opts.taxType || 'OUTPUT2' };
     });
     const contact = inv.contactId ? { ContactID: inv.contactId } : { Name: inv.contactName };
     const p = { Type: 'ACCREC', Contact: contact, Date: inv.date, DueDate: inv.dueDate, Reference: inv.reference || undefined, LineAmountTypes: 'Exclusive', Status: 'DRAFT', CurrencyCode: 'NZD', LineItems: items };

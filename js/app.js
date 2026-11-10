@@ -1042,6 +1042,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
             </div>
             <datalist id="contactList">${Object.keys(state.settings.contacts).map(c => `<option value="${esc(c)}">`).join('')}</datalist>
             ${m.contactId ? '' : `<p class="note">No Xero contact ID saved for this name. Xero will match it by name, so make sure it is spelled exactly as in Xero.</p>`}
+            ${xeroUpdateHTML()}
             <div class="table-wrap"><table class="xero-lines">
               <thead><tr><th style="width:44%">Description</th><th class="num">Qty</th><th class="num">Unit price</th><th>Account</th><th>Tax rate</th><th class="num">Amount NZD</th><th></th></tr></thead>
               <tbody>${comp.lines.map((l, i) => `<tr class="${l.kind === 'heading' ? 'heading-row' : ''}">
@@ -1050,7 +1051,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
                 ${l.kind === 'heading' ? '<td colspan="5" class="muted" style="font-size:.8rem">Description only</td>' : `
                 <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="qty" value="${l.quantity}" aria-label="Quantity">` : hrs(l.quantity)}</td>
                 <td class="num">${l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="unit" value="${l.unitAmount}" aria-label="Unit price">` : l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : (l.kind === 'time' || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
-                <td>${esc(state.settings.accountCode)} Sales</td><td>15% GST on Income</td>
+                <td>${l.accountCode && l.accountCode !== state.settings.accountCode ? esc(l.accountCode) : esc(state.settings.accountCode) + ' Sales'}</td><td>${l.taxType && l.taxType !== 'OUTPUT2' ? esc(l.taxType) : '15% GST on Income'}</td>
                 <td class="num">${money(l.amount)}</td>`}
                 <td><button class="btn-danger btn" data-del="${i}" aria-label="Remove line ${i + 1}">&times;</button></td>
               </tr>`).join('')}</tbody>
@@ -1067,7 +1068,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
               <button class="btn btn-small btn-quiet" id="resetLines">Reset lines</button>
             </div>
             <div class="add-lines" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
-              <button class="btn" id="xeroCreate" ${state.xero.connected ? '' : 'disabled'} title="${state.xero.connected ? '' : 'Connect Xero first (available once deployed to Netlify)'}">Create draft in Xero</button>
+              <button class="btn" id="xeroCreate" ${state.xero.connected ? '' : 'disabled'} title="${state.xero.connected ? '' : 'Connect Xero first (available once deployed to Netlify)'}">${inv.xeroTarget ? 'Update ' + esc(inv.xeroTarget.number) + ' in Xero' : 'Create draft in Xero'}</button>
               <button class="btn btn-quiet" id="csvBtn">Download Xero import file</button>
               <button class="btn btn-quiet" id="copyBtn">Copy invoice text</button>
               <button class="btn btn-quiet" id="markBtn">Mark as invoiced</button>
@@ -1175,6 +1176,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     $('#copyBtn').onclick = () => copyText(invoiceText());
     $('#markBtn').onclick = () => { markInvoiced(); toast('Recorded as invoiced'); };
     $('#xeroCreate').onclick = createInXero;
+    wireXeroUpdate(el, rerender);
     $('#xeroConnect')?.addEventListener('click', () => { location.href = '/api/xero-connect'; });
   }
 
@@ -1439,25 +1441,89 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     } catch { state.xero = { checked: true, available: false }; }
     const s = $('#xeroStatus'); if (s && state.view === 'invoicing') route();
   }
-  async function createInXero() {
+  // ----- update an existing Xero invoice -----
+  const XSTATUS = { DRAFT: 'Draft', SUBMITTED: 'Awaiting approval', AUTHORISED: 'Awaiting payment', PAID: 'Paid', VOIDED: 'Voided', DELETED: 'Deleted' };
+  function savedXeroLink(inv) { return (state.settings.invMeta || {})[invKey(inv)] || {}; }
+  function xeroUpdateHTML() {
+    const inv = state.inv, x = inv.xeroTarget, saved = savedXeroLink(inv);
+    const val = inv.xeroFindNo ?? (x ? x.number : '');
+    let card = '';
+    if (x) {
+      const locked = ['PAID', 'VOIDED', 'DELETED'].includes(x.status) || x.amountPaid > 0 || x.amountCredited > 0;
+      card = `<div class="xero-target${locked ? ' locked' : ''}">
+        <div><strong>${esc(x.number)}</strong> · ${esc(x.contactName)} · ${esc(XSTATUS[x.status] || x.status)} · ${money(x.total)} incl GST · ${x.lineItems.length} line${x.lineItems.length === 1 ? '' : 's'} in Xero · <a href="${esc(x.url)}" target="_blank" rel="noopener">Open in Xero</a></div>
+        ${locked ? `<p class="callout">This invoice is ${x.amountPaid > 0 ? 'part paid' : x.amountCredited > 0 ? 'credited' : (XSTATUS[x.status] || x.status).toLowerCase()} in Xero, so it cannot be updated from here.</p>`
+          : `<p class="note">Updating replaces <strong>all</strong> the lines on ${esc(x.number)} with the lines below, along with the contact, reference and dates above.${x.status === 'AUTHORISED' ? ' It is already approved: it stays approved, and if it has been sent, the online copy shows the new version.' : ''} To keep its current lines and change them, use <strong>Load its lines to edit</strong> first.</p>`}
+        <div class="add-lines">${locked ? '' : '<button class="btn btn-small" id="xLoad" type="button">Load its lines to edit</button>'}<button class="btn btn-small btn-quiet" id="xClear" type="button">Create a new invoice instead</button></div>
+      </div>`;
+    } else if (saved.xeroNumber) {
+      card = `<p class="note">This invoice was sent to Xero as <strong>${esc(saved.xeroNumber)}</strong>. Find it to update it rather than create another.</p>`;
+    }
+    return `<div class="xero-update">
+      <div class="xero-find"><label class="field"><span>Update an existing Xero invoice</span><input type="text" id="xFindNo" value="${esc(val || (x ? '' : saved.xeroNumber || ''))}" placeholder="Invoice number, e.g. INV-0528"></label>
+        <button class="btn btn-small btn-quiet" id="xFind" type="button" ${state.xero.connected ? '' : 'disabled title="Connect Xero first"'}>Find in Xero</button></div>
+      ${card}</div>`;
+  }
+  function wireXeroUpdate(el, rerender) {
     const inv = state.inv, m = inv.meta;
+    const keep = () => { const y = window.scrollY; rerender(); window.scrollTo({ top: y }); };
+    $('#xFindNo', el).oninput = e => { inv.xeroFindNo = e.target.value; };
+    $('#xFindNo', el).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('#xFind', el).click(); } };
+    $('#xFind', el).onclick = async () => {
+      const no = ($('#xFindNo', el).value || '').trim(); if (!no) { toast('Type the Xero invoice number first.'); return; }
+      const b = $('#xFind', el); b.disabled = true; b.textContent = 'Finding ...';
+      try {
+        const r = await fetch('/api/xero-find?number=' + encodeURIComponent(no), { headers: { accept: 'application/json' } });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || ('Xero returned ' + r.status));
+        inv.xeroTarget = j; inv.xeroFindNo = j.number; m.number = j.number;
+        keep(); toast(`Found ${j.number}. The button below now updates it.`);
+      } catch (e) { toast('Could not find it: ' + e.message, 6000); b.disabled = false; b.textContent = 'Find in Xero'; }
+    };
+    $('#xClear', el)?.addEventListener('click', () => { inv.xeroTarget = null; inv.xeroFindNo = ''; m.number = state.settings.nextInvoiceNumber || ''; keep(); });
+    $('#xLoad', el)?.addEventListener('click', () => {
+      const x = inv.xeroTarget; if (!x) return;
+      let id = 1;
+      const others = includedOthers().map(o => (o.description || '').trim().toLowerCase());
+      inv.lines = x.lineItems
+        .filter(l => !(others.includes((l.description || '').trim().toLowerCase()) && (l.quantity || l.unitAmount)))
+        .filter(l => !(/^other$/i.test((l.description || '').trim()) && !l.quantity && !l.unitAmount && others.length))
+        .map(l => !(+l.quantity) && !(+l.unitAmount)
+          ? { id: id++, kind: 'heading', project: '', description: l.description, auto: false }
+          : { id: id++, kind: 'manual', project: '', description: l.description, quantity0: l.quantity ?? 1, unitAmount0: l.unitAmount ?? 0, accountCode: l.accountCode, taxType: l.taxType });
+      inv.assign = {};
+      Object.assign(m, { contactName: x.contactName, contactId: x.contactId, reference: x.reference, date: x.date || m.date, due: x.due || m.due, number: x.number });
+      keep(); toast(`Loaded ${x.lineItems.length} lines from ${x.number}. Edit them, then click Update ${x.number} in Xero. Reset lines goes back to the timesheet lines.`, 7000);
+    });
+  }
+
+  async function createInXero() {
+    const inv = state.inv, m = inv.meta, x = inv.xeroTarget;
     const comp = computeInv();
     if (!m.contactName) { toast('Add the Xero contact first.'); return; }
-    const btn = $('#xeroCreate'); btn.disabled = true; btn.textContent = 'Creating draft ...';
+    const label = x ? `Update ${x.number} in Xero` : 'Create draft in Xero';
+    const btn = $('#xeroCreate'); btn.disabled = true; btn.textContent = x ? 'Updating ...' : 'Creating draft ...';
     const out = $('#invResult');
     try {
       const payload = C.xeroPayload(invForExport(), comp, state.settings);
       let attachment = null;
-      if (state.settings.attachPdf && window.jspdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
-      const r = await fetch('/api/xero-invoice', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invoice: payload, attachment }) });
+      if (!x && state.settings.attachPdf && window.jspdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
+      const r = await fetch('/api/xero-invoice', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invoice: payload, attachment, invoiceId: x ? x.invoiceId : undefined }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || ('Xero returned ' + r.status));
       markInvoiced(j.invoiceNumber, j.total);
-      inv.result = `<p><span class="chip ok">Draft created</span> ${esc(j.invoiceNumber || '')} for ${money(j.total ?? comp.total)}${j.attached ? ', schedule attached' : ''}. <a href="${esc(j.url)}" target="_blank" rel="noopener">Open in Xero</a></p>`;
-      out.innerHTML = inv.result; toast('Draft invoice created in Xero');
+      // remember which Xero invoice this one is, so it can be found and updated later
+      state.settings.invMeta = state.settings.invMeta || {};
+      state.settings.invMeta[invKey(inv)] = Object.assign({}, state.settings.invMeta[invKey(inv)], { xeroId: j.invoiceId, xeroNumber: j.invoiceNumber });
+      saveSettings();
+      if (x) { x.total = j.total; x.status = j.status || x.status; x.lineItems = payload.LineItems.map(l => ({ description: l.Description, quantity: l.Quantity ?? null, unitAmount: l.UnitAmount ?? null, accountCode: l.AccountCode || '', taxType: l.TaxType || '' })); }
+      inv.result = x
+        ? `<p><span class="chip ok">Updated</span> ${esc(j.invoiceNumber || x.number)} now totals ${money(j.total ?? comp.total)}. <a href="${esc(j.url)}" target="_blank" rel="noopener">Open in Xero</a></p>`
+        : `<p><span class="chip ok">Draft created</span> ${esc(j.invoiceNumber || '')} for ${money(j.total ?? comp.total)}${j.attached ? ', schedule attached' : ''}. <a href="${esc(j.url)}" target="_blank" rel="noopener">Open in Xero</a></p>`;
+      out.innerHTML = inv.result; toast(x ? `${x.number} updated in Xero` : 'Draft invoice created in Xero');
     } catch (e) {
-      out.innerHTML = `<p class="callout">Xero did not accept the draft: ${esc(e.message)}</p>`;
-    } finally { btn.disabled = false; btn.textContent = 'Create draft in Xero'; }
+      out.innerHTML = `<p class="callout">Xero did not accept ${x ? 'the update' : 'the draft'}: ${esc(e.message)}</p>`;
+    } finally { btn.disabled = false; btn.textContent = label; }
   }
 
 
