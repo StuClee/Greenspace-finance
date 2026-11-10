@@ -888,7 +888,8 @@
           <div class="panel">
             <div class="panel-head"><h2>Supporting schedule</h2>
               <div class="doc-tools">
-                <button class="btn btn-small" id="pdfBtn">Download PDF</button>
+                <button class="btn btn-small" id="pdfBtn">Save PDF</button>
+                <button class="btn btn-small btn-quiet" id="pdfOpenBtn">Open PDF</button>
                 <button class="btn btn-small btn-quiet" id="printBtn">Print</button>
               </div></div>
             <div class="paper${inv.sf ? ' sf' : ''}" id="scheduleDoc">
@@ -1055,6 +1056,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     });
     $('#resetLines').onclick = () => { rebuildInvoice(false); rerender(); };
     $('#pdfBtn').onclick = () => downloadPDF();
+    $('#pdfOpenBtn').onclick = () => openPDF();
     $('#printBtn').onclick = () => printDoc($('#scheduleDoc'));
     $('#csvBtn').onclick = () => {
       const csv = C.xeroCSV(invForExport(), computeInv(), state.settings);
@@ -1221,17 +1223,28 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     }
     return doc;
   }
+  // Save: lets you pick the folder and file name (Chrome / Edge "Save as" window); other browsers save to Downloads
   async function downloadPDF() {
-    if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Use Print and choose Save as PDF instead.'); return; }
-    // Open the PDF in a new tab first (opened inside the click so pop-up blockers allow it), then save a copy to Downloads
+    if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Reload the page and try again.'); return; }
+    let doc, name;
+    try { doc = buildSchedulePDF(); name = pdfName(); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message, 6000); return; }
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }] });
+        const w = await handle.createWritable(); await w.write(doc.output('blob')); await w.close();
+        toast(`Saved "${handle.name}"`, 5000); return;
+      } catch (e) { if (e && e.name === 'AbortError') return; console.warn('Save window not available, saving to Downloads', e); }
+    }
+    doc.save(name);
+    toast(`Saved to your Downloads folder as "${name}"`, 6000);
+  }
+  // Open: shows the PDF in a new tab to read or print (the tab keeps working, including its own save button)
+  function openPDF() {
+    if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Reload the page and try again.'); return; }
     const win = window.open('', '_blank');
     try {
-      const doc = buildSchedulePDF(), name = pdfName();
-      const url = URL.createObjectURL(doc.output('blob'));
-      if (win) { win.location.href = url; } 
-      doc.save(name);
-      toast(`Saved to your Downloads folder as "${name}"${win ? ' and opened in a new tab' : ''}`, 6000);
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const url = URL.createObjectURL(new File([buildSchedulePDF().output('blob')], pdfName(), { type: 'application/pdf' }));
+      if (win) win.location.href = url; else toast('Your browser blocked the new tab. Allow pop-ups for this site, or use Save PDF.', 6000);
     } catch (e) { if (win) win.close(); console.error(e); toast('Could not build the PDF: ' + e.message, 6000); }
   }
   async function pdfBase64() {
