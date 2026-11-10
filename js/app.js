@@ -238,9 +238,14 @@
   // Targets as used by the Dashboard and Timesheet: targetDays = net working days
   function effectiveTargets() {
     const out = {};
-    for (const mk of Object.keys(state.config.targets || {})) { const x = targetParts(mk); out[mk] = { target: x.target, targetDays: x.net }; }
+    for (const mk of Object.keys(state.config.targets || {})) {
+      const x = targetParts(mk), plan = state.config.targets[mk].plan;
+      out[mk] = { target: x.target, targetDays: plan ? planTotal(plan) : x.net, plan: plan || null };
+    }
     return out;
   }
+  const planTotal = plan => Object.values(plan || {}).reduce((a, b) => a + (+b || 0), 0);
+  const dayTargetFor = d => C.dayTarget(state.data.targets[C.monthKey(d)], d);
   function monthTargetPerDay(mk) {
     const t = state.data.targets[mk];
     return t && t.target ? t.target / (t.targetDays || 21) : 0;
@@ -472,7 +477,7 @@
     const work = entries.filter(r => r.client);
     const dayRev = work.reduce((a, b) => a + b.amount, 0);
     const dayHrs = work.reduce((a, b) => a + b.hours, 0);
-    const perDay = monthTargetPerDay(mk);
+    const perDay = dayTargetFor(date);
     const isWeekend = C.weekday(date) % 6 === 0;
     const cats = {}; work.forEach(b => { cats[b.category] = (cats[b.category] || 0) + b.hours; });
     const kmRows = entries.filter(r => r.kms);
@@ -536,7 +541,7 @@
 
       <div class="day-summary">
         <div class="kpi lead"><span class="label">$ for the day</span><span class="value">${money0(dayRev)}</span>
-          <span class="sub">${isWeekend ? 'Weekend' : `Target ${money0(perDay)}`}${!isWeekend && perDay ? ` · ${dayRev >= perDay ? '<span style="color:var(--good)">on target</span>' : `<span style="color:var(--bad)">${money0(dayRev - perDay)}</span>`}` : ''}</span></div>
+          <span class="sub">${perDay ? `Target ${money0(perDay)} · ${dayRev >= perDay ? '<span style="color:var(--good)">on target</span>' : `<span style="color:var(--bad)">${money0(dayRev - perDay)}</span>`}` : (isWeekend ? 'Weekend, no target' : 'No target planned for this day')}</span></div>
         <div class="kpi"><span class="label">Hours</span><span class="value">${hrs(dayHrs)}</span>
           <span class="sub">${Object.entries(cats).map(([c, h]) => `<span class="cat-dot" style="background:${CAT_COLORS[c]}"></span>${c} ${hrs(h)}`).join(' &nbsp; ') || 'No time recorded'}</span></div>
         <div class="kpi"><span class="label">Vehicle</span><span class="value">${kms ? kms.toLocaleString() + ' km' : '-'}</span>
@@ -555,7 +560,7 @@
         <div class="table-wrap"><table>
           <thead><tr><th>Date</th><th class="num">Hours</th><th class="num">$</th><th class="num">vs target</th><th>Clients</th><th class="num">Km</th></tr></thead>
           <tbody>${days.map(x => {
-            const tgt = C.weekday(x.date) % 6 === 0 ? 0 : monthTargetPerDay(C.monthKey(x.date));
+            const tgt = dayTargetFor(x.date);
             const v = x.amount - tgt;
             return `<tr class="clickable" data-date="${x.date}" tabindex="0">
               <td>${C.fmtDateLong(x.date)}</td><td class="num">${hrs(x.hours)}</td><td class="num">${money(x.amount)}</td>
@@ -1517,15 +1522,17 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         <div class="panel" style="grid-column:1 / -1">
           <div class="panel-head"><h2>Monthly targets</h2><span class="note">Working days are the weekdays in the month. Net working days set the daily target.</span></div>
           <div class="table-wrap" style="max-height:520px;overflow:auto"><table class="setup-table">
-            <thead><tr><th>Month</th><th class="num">Target $</th><th class="num">Working days</th><th class="num">Stats</th><th class="num">Sick</th><th class="num">Annual Leave</th><th class="num">Net working days</th><th class="num">$ per day</th></tr></thead>
+            <thead><tr><th>Month</th><th class="num">Target $</th><th class="num">Working days</th><th class="num">Stats</th><th class="num">Sick</th><th class="num">Annual Leave</th><th class="num">Net working days</th><th class="num">$ per day</th><th>Daily plan</th></tr></thead>
             <tbody>${tMonths.map(m => { const x = targetParts(m); const day = (f, v, l) => `<td><input type="number" min="0" step="0.5" data-tg="${m}" data-f="${f}" value="${v || ''}" placeholder="0" style="text-align:right;width:4.5em" aria-label="${l} in ${C.monthLabel(m)}"></td>`; return `<tr>
               <td class="key">${C.monthLabel(m)}</td>
               <td><input type="number" min="0" step="100" data-tg="${m}" data-f="target" value="${x.target || ''}" style="text-align:right" aria-label="Target for ${C.monthLabel(m)}"></td>
               <td class="num">${x.wd}</td>
               ${day('stats', x.stats, 'Stat days').replace('<td>', `<td title="${esc(x.hols.map(h => C.fmtDateNZ(h.date) + ' ' + h.name).join('\n') || 'No public holidays on weekdays')}">`)}${day('sick', x.sick, 'Sick days')}${day('leave', x.leave, 'Annual leave days')}
               <td class="num"><strong>${hrs(x.net)}</strong></td>
-              <td class="num">${x.target && x.net ? money0(x.target / x.net) : ''}</td></tr>`; }).join('')}</tbody>
+              <td class="num">${(() => { const pl = (cfg.targets[m] || {}).plan, tot = pl ? planTotal(pl) : x.net; return x.target && tot ? money0(x.target / tot) + (pl ? ' avg' : '') : ''; })()}</td>
+              <td>${(cfg.targets[m] || {}).plan ? `<button class="btn btn-small" data-plan="${m}">Edit plan</button> <span class="chip ok">${hrs(planTotal(cfg.targets[m].plan))} days</span>` : `<button class="btn btn-small btn-quiet" data-plan="${m}">Plan days</button>`}</td></tr>`; }).join('')}</tbody>
           </table></div>
+          ${state.planMonth ? planHTML(state.planMonth) : ''}
           <label class="field" style="margin-top:12px;max-width:220px"><span>Mileage rate $/km</span><input type="number" min="0" step="0.01" id="sMileage" value="${cfg.mileageRate}"></label>
         </div>
       </div>
@@ -1605,8 +1612,48 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     bind('#sAcct', v => s.accountCode = v || '200');
     $('#sAttach').onchange = e => { s.attachPdf = e.target.checked; saveSettings(); toast(s.attachPdf ? 'PDF will be attached to Xero drafts' : 'PDF will not be attached'); };
     bind('#sNonBill', v => s.nonBillable = v.split(',').map(x => x.trim()).filter(Boolean));
+    wirePlanner(el);
     $('#xlsxBtn').onclick = exportExcel;
     $('#backupBtn').onclick = () => downloadBlob(new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), entries: state.data.rows, config: state.config }, null, 1)], { type: 'application/json' }), `Greenspace Finance backup ${todayISO()}.json`);
+  }
+
+  // Daily plan for one month: weight per date (1 full day, 0.5 half day, 0 off). Target is spread in proportion.
+  function planHTML(mk) {
+    const t = state.config.targets[mk] || {}, x = targetParts(mk);
+    const plan = t.plan || defaultPlan(mk), tot = planTotal(plan);
+    const first = C.monthStart(mk), lead = (C.weekday(first) + 6) % 7; // Monday first
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push('<div class="pl-cell pl-empty"></div>');
+    for (let d = first; d <= C.monthEnd(mk); d = C.addDays(d, 1)) {
+      const w = +plan[d] || 0, hol = C.NZ_HOLIDAYS[d], we = C.weekday(d) % 6 === 0;
+      cells.push(`<div class="pl-cell${w ? '' : ' pl-off'}${we ? ' pl-we' : ''}">
+        <div class="pl-top"><span class="pl-d">${C.DAYS[C.weekday(d)]} ${+d.slice(8)}</span>${hol ? `<span class="pl-hol" title="${esc(hol)}">${esc(hol)}</span>` : ''}</div>
+        <select data-pw="${d}" aria-label="Working day ${C.fmtDateNZ(d)}">${[0, 0.25, 0.5, 0.75, 1, 1.25, 1.5].map(v => `<option value="${v}" ${Math.abs(v - w) < 1e-9 ? 'selected' : ''}>${v === 0 ? 'Off' : v === 1 ? 'Full day' : v + ' day'}</option>`).join('')}</select>
+        <div class="pl-amt">${w && tot && x.target ? money0(x.target * w / tot) : '-'}</div></div>`);
+    }
+    const diff = Math.round((tot - x.net) * 100) / 100;
+    return `<div class="planner" id="planner">
+      <div class="panel-head"><h3>Daily plan: ${C.monthLabel(mk)}</h3>
+        <div class="add-lines" style="margin:0">${t.plan ? '<button class="btn btn-small btn-quiet" id="plReset">Back to even split</button>' : ''}<button class="btn btn-small btn-quiet" id="plClose">Close</button></div></div>
+      <p class="note">Set how much of each day you plan to work. The ${money0(x.target)} target is shared across the planned days in proportion, and the Timesheet and Dashboard use each day's figure.
+        Planned <strong>${hrs(tot)}</strong> days${diff ? `, <span style="color:var(--warn)">${diff > 0 ? diff + ' more' : -diff + ' fewer'} than the ${hrs(x.net)} net working days above</span>` : ', matching the net working days above'}.${t.plan ? '' : ' <em>Not saved yet: change any day to save this plan.</em>'}</p>
+      <div class="pl-grid">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => `<div class="pl-head">${d}</div>`).join('')}${cells.join('')}</div>
+    </div>`;
+  }
+  function defaultPlan(mk) { const p = {}; for (let d = C.monthStart(mk); d <= C.monthEnd(mk); d = C.addDays(d, 1)) p[d] = C.defaultWeight(d); return p; }
+  function wirePlanner(el) {
+    const cfg = state.config, mk = state.planMonth;
+    $$('[data-plan]', el).forEach(b => b.onclick = () => { state.planMonth = b.dataset.plan; renderSetup(el); $('#planner')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); });
+    if (!mk) return;
+    $('#plClose').onclick = () => { state.planMonth = null; renderSetup(el); };
+    $('#plReset')?.addEventListener('click', () => { delete cfg.targets[mk].plan; state.data.targets = effectiveTargets(); saveSettings(); renderSetup(el); toast('Back to an even split'); });
+    $$('[data-pw]', el).forEach(sel => sel.onchange = () => {
+      cfg.targets[mk] = Object.assign({}, cfg.targets[mk]);
+      const plan = cfg.targets[mk].plan = Object.assign(defaultPlan(mk), cfg.targets[mk].plan || {});
+      plan[sel.dataset.pw] = +sel.value;
+      state.data.targets = effectiveTargets(); saveSettings();
+      const y = window.scrollY; renderSetup(el); window.scrollTo({ top: y });
+    });
   }
 
   function exportExcel() {

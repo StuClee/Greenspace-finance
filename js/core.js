@@ -418,13 +418,14 @@
     // daily target = target / net working days; the running target stops at the month target
     const netDays = t.targetDays || weekdays.length;
     const perDay = netDays ? target / netDays : 0;
+    const dayT = d => dayTarget(t, d);
     const daily = [];
     let cumA = 0, cumT = 0;
     for (let d = start; d <= end; d = addDays(d, 1)) {
       const a = round2(work.filter(r => r.date === d).reduce((s, r) => s + r.amount, 0));
       const hrs = work.filter(r => r.date === d).reduce((s, r) => s + r.hours, 0);
-      cumA += a; if (weekday(d) % 6 !== 0) cumT = Math.min(target, cumT + perDay);
-      daily.push({ date: d, actual: a, hours: hrs, cumActual: round2(cumA), cumTarget: round2(cumT), future: today && d > today });
+      cumA += a; cumT = Math.min(target, cumT + dayT(d));
+      daily.push({ date: d, actual: a, hours: hrs, target: round2(dayT(d)), cumActual: round2(cumA), cumTarget: round2(cumT), future: today && d > today });
     }
     const asOf = today && today < end ? (today < start ? start : today) : end;
     const targetToDate = round2(daily.filter(x => x.date <= asOf).slice(-1)[0]?.cumTarget || 0);
@@ -448,6 +449,14 @@
     '2027-10-25': 'Labour Day', '2027-12-27': 'Christmas Day (observed)', '2027-12-28': 'Boxing Day (observed)'
   };
   const holidaysIn = mk => Object.keys(NZ_HOLIDAYS).filter(d => d.startsWith(mk)).map(d => ({ date: d, name: NZ_HOLIDAYS[d] }));
+  // Default working-day weight: 1 on weekdays that are not public holidays, else 0
+  const defaultWeight = d => (weekday(d) % 6 === 0 || NZ_HOLIDAYS[d]) ? 0 : 1;
+  // Target for one date. With a daily plan: target x weight / total weights. Without: even split over net working days.
+  function dayTarget(t, d) {
+    if (!t || !t.target) return 0;
+    if (t.plan) { const tot = Object.values(t.plan).reduce((a, b) => a + (+b || 0), 0); return tot ? t.target * (+t.plan[d] || 0) / tot : 0; }
+    return defaultWeight(d) ? t.target / (t.targetDays || 21) : 0;
+  }
   function weekdaysIn(mk) {
     let n = 0; for (let d = monthStart(mk); d <= monthEnd(mk); d = addDays(d, 1)) if (weekday(d) % 6 !== 0) n++;
     return n;
@@ -456,7 +465,7 @@
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { holidaysIn, NZ_HOLIDAYS, weekdaysIn, matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { dayTarget, defaultWeight, holidaysIn, NZ_HOLIDAYS, weekdaysIn, matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);
