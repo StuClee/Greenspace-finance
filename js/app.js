@@ -708,6 +708,11 @@
     return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0 });
   }
 
+  // Key for remembering header edits on one invoice (client + projects + period)
+  function invKey(inv) {
+    const projs = inv.projects && inv.projects.length ? inv.projects.slice().sort() : [...new Set((inv.days || []).filter(d => d.hours || d.kms).map(d => d.project))].sort();
+    return [inv.client, projs.join('+'), inv.start, inv.end].join('|');
+  }
   // Sports fields / Landscaping / Standard, from the billing set-up of the first ticked project
   function setScheduleType(inv) {
     const first = (inv.projects && inv.projects[0]) || firstProjectFor(inv.client, inv.start, inv.end);
@@ -742,6 +747,8 @@
         date: inv.end, due: C.dueDateFor(inv.end, b.due)
       };
       inv.dueRule = b.due;
+      const saved = (state.settings.invMeta || {})[invKey(inv)];
+      if (saved) Object.assign(inv.meta, saved);
     }
     inv.result = null;
   }
@@ -1016,7 +1023,19 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       setAlloc(d, inp.dataset.f, isFinite(v) ? v : 0);
       const y = window.scrollY; rerender(); window.scrollTo({ top: y });
     });
-    const metaInput = (id, k) => { $(id).onchange = e => { m[k] = e.target.value.trim(); if (k === 'contactName') m.contactId = state.settings.contacts[m.contactName] || ''; if (k === 'date' && inv.dueRule) m.due = C.dueDateFor(m.date, inv.dueRule); rerender(); }; };
+    const metaInput = (id, k) => { $(id).onchange = e => {
+      m[k] = e.target.value.trim();
+      if (k === 'contactName') m.contactId = state.settings.contacts[m.contactName] || '';
+      if (k === 'date' && inv.dueRule) m.due = C.dueDateFor(m.date, inv.dueRule);
+      // remember this invoice's header (not the invoice number, which moves on)
+      if (k !== 'number') {
+        state.settings.invMeta = state.settings.invMeta || {};
+        const keep = Object.assign({}, state.settings.invMeta[invKey(inv)]);
+        for (const f of ['contactName', 'contactId', 'reference', 'date', 'due']) if (k === f || (k === 'contactName' && f === 'contactId') || (k === 'date' && f === 'due')) keep[f] = m[f];
+        state.settings.invMeta[invKey(inv)] = keep; saveSettings();
+      }
+      rerender();
+    }; };
     metaInput('#mContact', 'contactName'); metaInput('#mNumber', 'number'); metaInput('#mRef', 'reference'); metaInput('#mDate', 'date'); metaInput('#mDue', 'due');
     $$('[data-desc]', el).forEach(t => t.oninput = () => { const l = inv.lines[+t.dataset.desc]; l.description = t.value; l.auto = false; });
     $$('[data-desc]', el).forEach(t => t.onchange = rerender);
@@ -1248,7 +1267,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     try {
       const payload = C.xeroPayload(invForExport(), comp, state.settings);
       let attachment = null;
-      if (window.jspdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
+      if (state.settings.attachPdf && window.jspdf) { try { attachment = { fileName: pdfName(), base64: await pdfBase64() }; } catch (e) { console.warn('PDF for attachment failed', e); } }
       const r = await fetch('/api/xero-invoice', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invoice: payload, attachment }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || ('Xero returned ' + r.status));
@@ -1452,6 +1471,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
           <label class="field"><span>Consultant name on invoice lines</span><input type="text" id="sConsultant" value="${esc(s.consultant)}"></label>
           <label class="field"><span>Next invoice number</span><input type="text" id="sNext" value="${esc(s.nextInvoiceNumber)}"></label>
           <label class="field"><span>Sales account code</span><input type="text" id="sAcct" value="${esc(s.accountCode)}"></label>
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sAttach" ${s.attachPdf ? 'checked' : ''}> Attach the Schedule of Hours PDF to Xero drafts</label>
           <label class="field"><span>Not invoiced (internal time), comma separated</span><input type="text" id="sNonBill" value="${esc(s.nonBillable.join(', '))}"></label>
           <h3 style="margin-top:6px">Xero contacts</h3>
           <div class="table-wrap"><table><thead><tr><th>Name</th><th>Contact ID</th></tr></thead>
@@ -1499,6 +1519,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     bind('#sConsultant', v => s.consultant = v);
     bind('#sNext', v => s.nextInvoiceNumber = v);
     bind('#sAcct', v => s.accountCode = v || '200');
+    $('#sAttach').onchange = e => { s.attachPdf = e.target.checked; saveSettings(); toast(s.attachPdf ? 'PDF will be attached to Xero drafts' : 'PDF will not be attached'); };
     bind('#sNonBill', v => s.nonBillable = v.split(',').map(x => x.trim()).filter(Boolean));
     $('#xlsxBtn').onclick = exportExcel;
     $('#backupBtn').onclick = () => downloadBlob(new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), entries: state.data.rows, config: state.config }, null, 1)], { type: 'application/json' }), `Greenspace Finance backup ${todayISO()}.json`);
