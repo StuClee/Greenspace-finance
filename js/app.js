@@ -708,6 +708,12 @@
     return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0 });
   }
 
+  // Name shown for a project on schedules: its invoice heading from Setup (without {month}), else the timesheet code
+  function projectLabel(p) {
+    const b = state.inv ? billingFor(state.inv.client, p) : null;
+    const h = b && b.header ? b.header.replace(/\s*\{month\}/g, '').trim() : '';
+    return h || p;
+  }
   // Key for remembering header edits on one invoice (client + projects + period)
   function invKey(inv) {
     const projs = inv.projects && inv.projects.length ? inv.projects.slice().sort() : [...new Set((inv.days || []).filter(d => d.hours || d.kms).map(d => d.project))].sort();
@@ -842,7 +848,7 @@
     const vehicle = comp.lines.filter(l => l.kind === 'vehicle').reduce((a, l) => a + l.amount, 0);
     const other = comp.lines.filter(l => l.kind === 'manual').reduce((a, l) => a + l.amount, 0);
     const matAmt = comp.lines.filter(l => l.kind === 'mat').reduce((a, l) => a + l.amount, 0);
-    const projTitle = inv.projects.length ? inv.projects.join(', ') : [...new Set(workDays.map(x => x.project))].join(', ');
+    const projTitle = (inv.projects.length ? inv.projects : [...new Set(workDays.map(x => x.project))]).map(projectLabel).join(', ');
     const lineLabel = l => `Line ${comp.lines.indexOf(l) + 1}`;
 
     el.innerHTML = `
@@ -1108,7 +1114,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const green = [44, 106, 68], ink = [27, 36, 30], grey = [93, 106, 97], line = [217, 224, 215];
     const workDays = inv.days.filter(x => x.hours), kmDays = inv.days.filter(x => x.kms);
     const multiProj = new Set(inv.days.map(x => x.project)).size > 1;
-    const projTitle = inv.projects.length ? inv.projects.join(', ') : [...new Set(workDays.map(x => x.project))].join(', ');
+    const projTitle = (inv.projects.length ? inv.projects : [...new Set(workDays.map(x => x.project))]).map(projectLabel).join(', ');
     const n = v => (+v || 0), h = v => n(v) ? hrs(n(v)) : '';
 
     // header
