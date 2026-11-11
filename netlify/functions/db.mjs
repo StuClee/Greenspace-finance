@@ -9,6 +9,7 @@ import { getStore } from '@netlify/blobs';
 const store = () => getStore({ name: 'gsdata', consistency: 'strong' });
 const json = (b, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const stable = v => Array.isArray(v) ? '[' + v.map(stable).join(',') + ']' : v && typeof v === 'object' ? '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}' : JSON.stringify(v ?? null);
 const sortEntries = list => list.sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
 
 async function allEntries(s) {
@@ -37,6 +38,13 @@ export default async (req) => {
       if (!DAY.test(day)) return json({ error: 'Bad date' }, 400);
       const key = 'entries/' + day.slice(0, 7);
       const list = (await s.get(key, { type: 'json' })) || [];
+      // Refuse a save made from an out-of-date copy of this day (changed in another tab or on another device
+      // since this one loaded it), so an old tab can never put back entries that were changed or merged. The app merges and tries again.
+      if (Array.isArray(body.base)) {
+        const current = list.filter(e => e.date === day);
+        const norm = l => stable(l.map(e => ({ ...e, date: day })).sort((a, b) => String(a.id).localeCompare(String(b.id))));
+        if (norm(current) !== norm(body.base)) return json({ error: 'conflict', entries: current }, 409);
+      }
       const incoming = (body.entries || []).map(e => ({ ...e, date: day }));
       const next = sortEntries(list.filter(e => e.date !== day).concat(incoming));
       await s.setJSON(key, next);
