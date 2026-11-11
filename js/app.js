@@ -11,6 +11,22 @@
   const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${C.pad(d.getMonth() + 1)}-${C.pad(d.getDate())}`; };
   const CAT_COLORS = { Consulting: 'var(--accent)', Landscaping: 'var(--soil)', Admin: 'var(--muted)', Travel: 'var(--warn)' };
   const clone = o => JSON.parse(JSON.stringify(o));
+  // Key-order independent JSON, so the same entry always compares equal
+  const stable = v => Array.isArray(v) ? '[' + v.map(stable).join(',') + ']' : v && typeof v === 'object' ? '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}' : JSON.stringify(v ?? null);
+  // Three-way merge of one day's timesheet entries, matched by id. Entries changed in this tab win;
+  // entries changed, added or deleted in another tab or device are kept.
+  function mergeDay(base, mine, theirs) {
+    const by = l => new Map((l || []).map(e => [e.id, e]));
+    const B = by(base), M = by(mine), T = by(theirs), out = [];
+    for (const id of new Set([...M.keys(), ...T.keys()])) {
+      const b = B.get(id), m = M.get(id), t = T.get(id);
+      const mChanged = !b || !m || stable(m) !== stable(b), tChanged = !b || !t || stable(t) !== stable(b);
+      if (m && t) out.push(mChanged ? m : t);
+      else if (m) { if (!b || mChanged) out.push(m); }      // deleted elsewhere: drop unless edited here
+      else if (t) { if (!b || tChanged) out.push(t); }      // deleted here: drop unless edited elsewhere
+    }
+    return out.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  }
 
   // Three-way merge of settings: base = copy last loaded/saved, mine = this tab, theirs = what the site now holds.
   // Changes from both sides are kept; where both changed the same value, this tab wins.
@@ -96,7 +112,24 @@
     saveLocal() { store.set('gs.db', { entries: state.data.rows, config: state.config }); },
     async saveDay(date, entries) {
       if (this.mode === 'local') return this.saveLocal();
-      return this.send('/api/db?day=' + date, 'PUT', { entries });
+      let merged = false;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const base = state.dayBase[date] || [];
+        const r = await fetch('/api/db?day=' + date, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ entries, base }) });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) {
+          state.dayBase[date] = clone(entries);
+          if (merged) { toast('Kept changes made to ' + C.fmtDateNZ(date) + ' in another tab or device'); if (!state.editing) route(); }
+          return j;
+        }
+        if (r.status !== 409 || !j.entries) throw new Error(j.error || 'Save failed (' + r.status + ')');
+        // This day was changed in another tab or on another device since this tab loaded it: keep both, then save again.
+        entries = mergeDay(base, entries, j.entries);
+        state.dayBase[date] = clone(j.entries);
+        state.data.rows = state.data.rows.filter(r => r.date !== date).concat(clone(entries)).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+        state.inv = null; merged = true;
+      }
+      throw new Error('this day keeps changing in another tab, reload the page');
     },
     async saveConfig(config) {
       if (this.mode === 'local') return this.saveLocal();
@@ -148,7 +181,7 @@
   }
 
   const state = {
-    config: null, settings: null, data: null, view: 'dashboard',
+    config: null, settings: null, data: null, view: 'dashboard', dayBase: {},
     tsDate: null, tsMonth: null, dashMonth: null, editing: null,
     inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, saving: 0
   };
@@ -159,6 +192,8 @@
     if (state.data) { state.data.targets = effectiveTargets(); state.data.projects = state.config.projects; state.data.mileageRate = state.config.mileageRate; }
   }
   function setRows(rows) {
+    state.dayBase = {};
+    for (const r of rows) (state.dayBase[r.date] = state.dayBase[r.date] || []).push(clone(r));
     state.data = { rows: rows.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), targets: effectiveTargets(), projects: state.config.projects, mileageRate: state.config.mileageRate, fromDate: state.settings.fromDate };
   }
 
@@ -288,7 +323,7 @@
   const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   function billingFor(client, project) {
     const p = state.settings.projects;
-    return p[client + '|' + project] || p[client + '|*'] || { contact: client, reference: '', header: '', due: '20th' };
+    return p[client + '|' + project] || p[client + '|*'] || { contact: client, reference: '', header: '', due: '20th', missing: true };
   }
   const isBillable = client => client && !state.settings.nonBillable.includes(client);
   // Monthly target days: Working days (weekdays) less Stats, Sick and Annual Leave = Net working days
@@ -994,6 +1029,12 @@
       const x = pm.get(r.project) || { h: 0, a: 0 }; x.h += r.hours; x.a += r.amount + r.kmAmt; pm.set(r.project, x);
     }
     const projList = [...pm.entries()].sort((a, b) => b[1].a - a[1].a);
+    // Only offer the Sports field / Landscaping schedules to clients set up for them on the Setup page
+    const schedTypes = new Set(Object.entries(state.settings.projects).filter(([k]) => k.startsWith(inv.client + '|')).map(([, v]) => v.schedule));
+    projList.forEach(([p]) => schedTypes.add(billingFor(inv.client, p).schedule));
+    const showSF = inv.sf || schedTypes.has('sf');
+    const showLand = inv.land || schedTypes.has('land') || (state.config.materials || []).some(x => x.client === inv.client && !x.invoice);
+    const unbilled = inv.client ? projList.map(x => x[0]).filter(p => billingFor(inv.client, p).missing) : [];
     const periodMonth = inv.start === C.monthStart(C.monthKey(inv.start)) && inv.end === C.monthEnd(C.monthKey(inv.start)) ? C.monthKey(inv.start) : '';
     applyXeroNumber();
     const comp = computeInv();
@@ -1030,8 +1071,9 @@
             <div class="field"><span>Projects</span>
               <div class="checklist">${projList.map(([p, x]) => `<label><input type="checkbox" class="proj-cb" value="${esc(p)}" ${!inv.projects.length || inv.projects.includes(p) ? 'checked' : ''}> ${esc(p)} <span class="num">${hrs(x.h)} h</span></label>`).join('') || '<span class="muted">None</span>'}</div>
             </div>
-            <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iSF" ${inv.sf ? 'checked' : ''} style="margin-top:4px"> <span>Sports field schedule<br><span class="muted" style="font-size:.8rem">Split hours into Visits, P27, Reporting-Admin and Technical Support</span></span></label>
-            <label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iLand" ${inv.land ? 'checked' : ''} style="margin-top:4px"> <span>Landscaping schedule<br><span class="muted" style="font-size:.8rem">Labour from the timesheet plus this client's materials</span></span></label>
+            ${showSF ? `<label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iSF" ${inv.sf ? 'checked' : ''} style="margin-top:4px"> <span>Sports field schedule<br><span class="muted" style="font-size:.8rem">Split hours into Visits, P27, Reporting-Admin and Technical Support</span></span></label>` : ''}
+            ${showLand ? `<label class="checklist" style="display:flex;gap:8px;align-items:flex-start;font-size:.9rem"><input type="checkbox" id="iLand" ${inv.land ? 'checked' : ''} style="margin-top:4px"> <span>Landscaping schedule<br><span class="muted" style="font-size:.8rem">Labour from the timesheet plus this client's materials</span></span></label>` : ''}
+            ${unbilled.length ? `<div class="callout">No billing set up for ${esc(inv.client)} (${unbilled.map(esc).join(', ')}), so the contact shows as "${esc(inv.client)}". If this client was merged or renamed, reload the page; if it still shows, run the merge on the Setup page again.</div>` : ''}
             ${billingFor(inv.client, projList[0]?.[0]).check ? `<div class="callout">Check who this project is billed to on the Setup page.</div>` : ''}
           </div>
           <div class="panel">
@@ -1183,8 +1225,8 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       setDayEdit(d, 'adj', v === '' || v === d.hoursRaw ? '' : v);
       const y = window.scrollY; rerender(); window.scrollTo({ top: y });
     });
-    $('#iSF').onchange = e => { inv.sf = e.target.checked; if (inv.sf) inv.land = false; rebuildInvoice(false); rerender(); };
-    $('#iLand').onchange = e => { inv.land = e.target.checked; if (inv.land) inv.sf = false; inv.matOff = {}; rebuildInvoice(false); rerender(); };
+    if ($('#iSF')) $('#iSF').onchange = e => { inv.sf = e.target.checked; if (inv.sf) inv.land = false; rebuildInvoice(false); rerender(); };
+    if ($('#iLand')) $('#iLand').onchange = e => { inv.land = e.target.checked; if (inv.land) inv.sf = false; inv.matOff = {}; rebuildInvoice(false); rerender(); };
     const keepScroll = () => { const y = window.scrollY; rerender(); window.scrollTo({ top: y }); };
     $$('[data-of]', el).forEach(inp => inp.onchange = () => { setOther(inp.dataset.o, inp.dataset.of, inp.value); keepScroll(); });
     $$('[data-ooff]', el).forEach(cb => cb.onchange = () => { inv.otherOff[cb.dataset.ooff] = !cb.checked; keepScroll(); });
@@ -2031,14 +2073,25 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState !== 'visible' || db.mode !== 'server' || !state.data || state.saving) return;
     try {
-      const { config } = await db.getJSON('/api/db?config=1');
-      if (!config || config.savedAt === db.base || state.saving) return;
-      const theirs = normaliseConfig(config);
-      const changedHere = state.baseConfig && JSON.stringify(state.config) !== JSON.stringify(state.baseConfig);
-      applyConfig(changedHere ? merge3(state.baseConfig, clone(state.config), theirs) : theirs);
-      db.base = config.savedAt; state.baseConfig = clone(theirs);
-      if (changedHere) saveSettings();
-      if (['setup', 'dashboard'].includes(state.view)) route();
+      const res = await db.getJSON('/api/db');
+      if (state.saving) return;
+      let redraw = false;
+      // settings first, so the entries below are shown with the current clients and billing
+      const config = res.config;
+      if (config && config.savedAt !== db.base) {
+        const theirs = normaliseConfig(config);
+        const changedHere = state.baseConfig && JSON.stringify(state.config) !== JSON.stringify(state.baseConfig);
+        const before = stable([state.config.projects, state.settings.projects]);
+        applyConfig(changedHere ? merge3(state.baseConfig, clone(state.config), theirs) : theirs);
+        db.base = config.savedAt; state.baseConfig = clone(theirs);
+        if (changedHere) saveSettings();
+        if (stable([state.config.projects, state.settings.projects]) !== before) { state.inv = null; redraw = true; }
+        if (['setup', 'dashboard'].includes(state.view)) redraw = true;
+      }
+      // timesheet entries: pick up changes made elsewhere (a client merged, or entries edited on another device)
+      const fresh = res.entries || [];
+      if (stable(fresh) !== stable(state.data.rows) && !state.editing) { setRows(fresh); state.inv = null; redraw = true; }
+      if (redraw && !state.editing) route();
     } catch { /* offline: the next save will sort it out */ }
   });
 })();
