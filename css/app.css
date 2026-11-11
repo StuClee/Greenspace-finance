@@ -310,3 +310,9 @@ tr.mat-off td { opacity: .45; }
 .xero-target { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .xero-target.locked { background: color-mix(in srgb, var(--bad, #b3412f) 9%, transparent); }
 .xero-target .note { margin: 6px 0; }
+
+/* Xero invoice number hint */
+.xno-row { margin: -4px 0 10px; font-size: .78rem; color: var(--muted); }
+.xno-hint { display: inline; margin-top: 4px; font-size: .74rem; color: var(--muted); line-height: 1.5; }
+.xno { font: inherit; font-size: .74rem; padding: 1px 6px; margin: 1px 2px 1px 0; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
+.xno.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
