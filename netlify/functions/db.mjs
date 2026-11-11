@@ -1,7 +1,8 @@
 // Greenspace Finance database (Netlify Blobs, store "gsdata").
 //   GET  /api/db                 -> { entries, config, empty }
 //   PUT  /api/db?day=YYYY-MM-DD  -> body { entries: [...] } replaces that day's entries
-//   PUT  /api/db?config=1        -> body { config } replaces settings, rates and targets
+//   GET  /api/db?config=1        -> { config } settings only
+//   PUT  /api/db?config=1        -> body { config, base } replaces settings, rates and targets; 409 + { config } if base is not the stored savedAt
 //   POST /api/db?import=1        -> body { entries, config, from } one-off import (backs up first)
 import { getStore } from '@netlify/blobs';
 
@@ -20,6 +21,9 @@ export default async (req) => {
   const s = store();
   const u = new URL(req.url);
   try {
+    if (req.method === 'GET' && u.searchParams.has('config')) {
+      return json({ config: await s.get('config', { type: 'json' }) });
+    }
     if (req.method === 'GET') {
       const [entries, config] = await Promise.all([allEntries(s), s.get('config', { type: 'json' })]);
       return json({ entries, config, empty: !config && !entries.length });
@@ -41,8 +45,15 @@ export default async (req) => {
 
     if (req.method === 'PUT' && u.searchParams.has('config')) {
       if (!body.config || typeof body.config !== 'object') return json({ error: 'Missing config' }, 400);
-      await s.setJSON('config', { ...body.config, savedAt: new Date().toISOString() });
-      return json({ ok: true });
+      // Refuse a save made from an out-of-date copy (another tab or device saved since this one loaded),
+      // so an old tab can never wipe newer settings. The app merges and tries again.
+      const current = await s.get('config', { type: 'json' });
+      if (current && current.savedAt && body.base !== undefined && body.base !== current.savedAt) {
+        return json({ error: 'conflict', config: current }, 409);
+      }
+      const savedAt = new Date().toISOString();
+      await s.setJSON('config', { ...body.config, savedAt });
+      return json({ ok: true, savedAt });
     }
 
     if (req.method === 'POST' && u.searchParams.has('import')) {
