@@ -842,6 +842,9 @@
       inv.dueRule = b.due;
       const saved = (state.settings.invMeta || {})[invKey(inv)];
       if (saved) Object.assign(inv.meta, saved);
+      // an invoice already sent to Xero keeps its real Xero number
+      inv.numberSource = saved && saved.xeroNumber ? 'saved' : 'suggested';
+      if (saved && saved.xeroNumber) inv.meta.number = saved.xeroNumber;
     }
     inv.result = null;
   }
@@ -924,6 +927,7 @@
     }
     const projList = [...pm.entries()].sort((a, b) => b[1].a - a[1].a);
     const periodMonth = inv.start === C.monthStart(C.monthKey(inv.start)) && inv.end === C.monthEnd(C.monthKey(inv.start)) ? C.monthKey(inv.start) : '';
+    applyXeroNumber();
     const comp = computeInv();
     const timeLines = comp.lines.filter(l => l.kind === 'time');
     const allocLines = comp.lines.filter(l => l.kind === 'alloc');
@@ -1040,6 +1044,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
               <label class="field"><span>Date</span><input type="date" id="mDate" value="${m.date}"></label>
               <label class="field"><span>Due date</span><input type="date" id="mDue" value="${m.due}"></label>
             </div>
+            ${state.xero.connected ? `<div class="xno-row"><strong>Invoice number:</strong> ${xeroNumberHint()}</div>` : ''}
             <datalist id="contactList">${Object.keys(state.settings.contacts).map(c => `<option value="${esc(c)}">`).join('')}</datalist>
             ${m.contactId ? '' : `<p class="note">No Xero contact ID saved for this name. Xero will match it by name, so make sure it is spelled exactly as in Xero.</p>`}
             ${xeroUpdateHTML()}
@@ -1137,6 +1142,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     });
     const metaInput = (id, k) => { $(id).onchange = e => {
       m[k] = e.target.value.trim();
+      if (k === 'number') inv.numberSource = 'typed';
       if (k === 'contactName') m.contactId = state.settings.contacts[m.contactName] || '';
       if (k === 'date' && inv.dueRule) m.due = C.dueDateFor(m.date, inv.dueRule);
       // remember this invoice's header (not the invoice number, which moves on)
@@ -1177,6 +1183,8 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     $('#markBtn').onclick = () => { markInvoiced(); toast('Recorded as invoiced'); };
     $('#xeroCreate').onclick = createInXero;
     wireXeroUpdate(el, rerender);
+    $$('[data-xno]', el).forEach(b => b.onclick = () => { m.number = b.dataset.xno; inv.numberSource = 'picked'; inv.xeroFindNo = b.dataset.xno; const y = window.scrollY; rerender(); window.scrollTo({ top: y }); toast(`Invoice number set to ${b.dataset.xno}. The schedule and PDF now show it.`); });
+    lookupXeroNumbers(rerender);
     $('#xeroConnect')?.addEventListener('click', () => { location.href = '/api/xero-connect'; });
   }
 
@@ -1441,6 +1449,51 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     } catch { state.xero = { checked: true, available: false }; }
     const s = $('#xeroStatus'); if (s && state.view === 'invoicing') route();
   }
+  // ----- real Xero invoice numbers for the schedule -----
+  // Looks up sales invoices in Xero for this period, then picks the one that matches this invoice
+  // (same contact and reference, same total if there are several). Otherwise suggests Xero's next free number.
+  const xnums = {};
+  const xnumRange = inv => ({ from: inv.start, to: C.addDays(inv.end, 25) });
+  function lookupXeroNumbers(rerender) {
+    const inv = state.inv; if (!inv || !state.xero.connected) return;
+    const r = xnumRange(inv), k = r.from + '|' + r.to;
+    if (xnums[k]) { applyXeroNumber(); return; }
+    xnums[k] = { loading: true, invoices: [], next: '' };
+    fetch(`/api/xero-numbers?from=${r.from}&to=${r.to}`, { headers: { accept: 'application/json' } })
+      .then(res => res.json().then(j => { if (!res.ok) throw new Error(j.error || res.status); return j; }))
+      .then(j => { xnums[k] = { invoices: j.invoices || [], next: j.next || '' }; })
+      .catch(e => { xnums[k] = { error: e.message, invoices: [], next: '' }; })
+      .finally(() => { if (state.view === 'invoicing' && state.inv === inv) { applyXeroNumber(); const y = window.scrollY; rerender(); window.scrollTo({ top: y }); } });
+  }
+  function xeroCandidates() {
+    const inv = state.inv, m = inv.meta, r = xnumRange(inv), x = xnums[r.from + '|' + r.to];
+    if (!x || x.loading) return null;
+    const norm = v => String(v || '').toLowerCase().replace(/^po\s*/, '').replace(/\s+/g, '');
+    const sameContact = i => (m.contactId && i.contactId === m.contactId) || norm(i.contactName) === norm(m.contactName);
+    const list = x.invoices.filter(sameContact);
+    const total = computeInv().total;
+    const refMatch = list.filter(i => m.reference && norm(i.reference) === norm(m.reference));
+    const exact = (refMatch.length ? refMatch : list).filter(i => Math.abs((+i.total || 0) - total) < 0.01);
+    const best = exact.length === 1 ? exact[0] : refMatch.length === 1 ? refMatch[0] : null;
+    return { list, refMatch, best, next: x.next, error: x.error };
+  }
+  function applyXeroNumber() {
+    const inv = state.inv; if (!inv || ['typed', 'picked', 'saved', 'xero'].includes(inv.numberSource)) return;
+    const c = xeroCandidates(); if (!c) return;
+    if (c.best) { inv.meta.number = c.best.number; inv.numberSource = 'matched'; inv.xeroFindNo = c.best.number; }
+    else if (c.next && inv.numberSource !== 'matched') { inv.meta.number = c.next; inv.numberSource = 'next'; }
+  }
+  function xeroNumberHint() {
+    const inv = state.inv; if (!state.xero.connected) return '';
+    const c = xeroCandidates();
+    if (!c) return '<span class="xno-hint">Checking Xero ...</span>';
+    if (c.error) return `<span class="xno-hint">Could not check Xero numbers: ${esc(c.error)}</span>`;
+    const chip = i => `<button type="button" class="xno${i.number === inv.meta.number ? ' on' : ''}" data-xno="${esc(i.number)}" title="${esc(i.reference || '')} · ${esc(i.date)}">${esc(i.number)} ${money(i.total)}</button>`;
+    const shown = c.refMatch.length ? c.refMatch : c.list;
+    const src = { matched: 'Matched in Xero', saved: 'Sent from this app', next: 'Not in Xero yet: next free number', picked: 'Picked', typed: 'Typed', xero: 'From Xero' }[inv.numberSource] || '';
+    return `<span class="xno-hint">${src ? esc(src) + '. ' : ''}${shown.length ? `In Xero for this contact${c.refMatch.length ? ' and reference' : ''}: ${shown.map(chip).join(' ')}` : (inv.numberSource === 'next' ? '' : `Next free number in Xero: <button type="button" class="xno" data-xno="${esc(c.next)}">${esc(c.next)}</button>`)}</span>`;
+  }
+
   // ----- update an existing Xero invoice -----
   const XSTATUS = { DRAFT: 'Draft', SUBMITTED: 'Awaiting approval', AUTHORISED: 'Awaiting payment', PAID: 'Paid', VOIDED: 'Voided', DELETED: 'Deleted' };
   function savedXeroLink(inv) { return (state.settings.invMeta || {})[invKey(inv)] || {}; }
@@ -1476,11 +1529,11 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         const r = await fetch('/api/xero-find?number=' + encodeURIComponent(no), { headers: { accept: 'application/json' } });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error || ('Xero returned ' + r.status));
-        inv.xeroTarget = j; inv.xeroFindNo = j.number; m.number = j.number;
+        inv.xeroTarget = j; inv.xeroFindNo = j.number; m.number = j.number; inv.numberSource = 'xero';
         keep(); toast(`Found ${j.number}. The button below now updates it.`);
       } catch (e) { toast('Could not find it: ' + e.message, 6000); b.disabled = false; b.textContent = 'Find in Xero'; }
     };
-    $('#xClear', el)?.addEventListener('click', () => { inv.xeroTarget = null; inv.xeroFindNo = ''; m.number = state.settings.nextInvoiceNumber || ''; keep(); });
+    $('#xClear', el)?.addEventListener('click', () => { inv.xeroTarget = null; inv.xeroFindNo = ''; inv.numberSource = 'suggested'; m.number = state.settings.nextInvoiceNumber || ''; applyXeroNumber(); keep(); });
     $('#xLoad', el)?.addEventListener('click', () => {
       const x = inv.xeroTarget; if (!x) return;
       let id = 1;
@@ -1492,7 +1545,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
           ? { id: id++, kind: 'heading', project: '', description: l.description, auto: false }
           : { id: id++, kind: 'manual', project: '', description: l.description, quantity0: l.quantity ?? 1, unitAmount0: l.unitAmount ?? 0, accountCode: l.accountCode, taxType: l.taxType });
       inv.assign = {};
-      Object.assign(m, { contactName: x.contactName, contactId: x.contactId, reference: x.reference, date: x.date || m.date, due: x.due || m.due, number: x.number });
+      Object.assign(m, { contactName: x.contactName, contactId: x.contactId, reference: x.reference, date: x.date || m.date, due: x.due || m.due, number: x.number }); inv.numberSource = 'xero';
       keep(); toast(`Loaded ${x.lineItems.length} lines from ${x.number}. Edit them, then click Update ${x.number} in Xero. Reset lines goes back to the timesheet lines.`, 7000);
     });
   }
@@ -1516,11 +1569,14 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       state.settings.invMeta = state.settings.invMeta || {};
       state.settings.invMeta[invKey(inv)] = Object.assign({}, state.settings.invMeta[invKey(inv)], { xeroId: j.invoiceId, xeroNumber: j.invoiceNumber });
       saveSettings();
+      if (j.invoiceNumber) { m.number = j.invoiceNumber; inv.numberSource = 'xero'; inv.xeroFindNo = j.invoiceNumber; }
+      for (const k in xnums) delete xnums[k];
       if (x) { x.total = j.total; x.status = j.status || x.status; x.lineItems = payload.LineItems.map(l => ({ description: l.Description, quantity: l.Quantity ?? null, unitAmount: l.UnitAmount ?? null, accountCode: l.AccountCode || '', taxType: l.TaxType || '' })); }
       inv.result = x
         ? `<p><span class="chip ok">Updated</span> ${esc(j.invoiceNumber || x.number)} now totals ${money(j.total ?? comp.total)}. <a href="${esc(j.url)}" target="_blank" rel="noopener">Open in Xero</a></p>`
         : `<p><span class="chip ok">Draft created</span> ${esc(j.invoiceNumber || '')} for ${money(j.total ?? comp.total)}${j.attached ? ', schedule attached' : ''}. <a href="${esc(j.url)}" target="_blank" rel="noopener">Open in Xero</a></p>`;
-      out.innerHTML = inv.result; toast(x ? `${x.number} updated in Xero` : 'Draft invoice created in Xero');
+      toast(x ? `${x.number} updated in Xero` : `Draft ${j.invoiceNumber || ''} created in Xero. Save the PDF now so it shows this number.`, 6000);
+      route();
     } catch (e) {
       out.innerHTML = `<p class="callout">Xero did not accept ${x ? 'the update' : 'the draft'}: ${esc(e.message)}</p>`;
     } finally { btn.disabled = false; btn.textContent = label; }
