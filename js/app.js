@@ -1774,6 +1774,36 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
   // ======================================================================
   // SETUP
   // ======================================================================
+  function allClientCodes() { return [...new Set([...clientsList(), ...state.data.rows.map(r => r.client).filter(Boolean)])].sort((a, b) => a.localeCompare(b)); }
+  // Move everything held under client code `from` to client code `to` (merge, or rename when `to` is new).
+  async function mergeClient(from, to) {
+    const cfg = state.config, s = state.settings;
+    const moveKeys = obj => {
+      if (!obj) return;
+      for (const k of Object.keys(obj)) {
+        if (!k.startsWith(from + '|')) continue;
+        const nk = to + k.slice(from.length);
+        if (obj[nk] && typeof obj[nk] === 'object') obj[nk] = Object.assign({}, obj[k], Object.fromEntries(Object.entries(obj[nk]).filter(([, v]) => v !== '' && v !== null && v !== undefined)));
+        else if (!(nk in obj)) obj[nk] = obj[k];
+        delete obj[k];
+      }
+    };
+    cfg.projects = cfg.projects.filter(p => p.client !== from || !cfg.projects.some(q => q.client === to && q.project === p.project));
+    cfg.projects.forEach(p => { if (p.client === from) p.client = to; });
+    moveKeys(s.projects); moveKeys(s.dayEdits); moveKeys(s.invMeta);
+    for (const list of [s.invoiced, cfg.materials, cfg.otherItems, cfg.archivedMaterials]) (list || []).forEach(x => { if (x && x.client === from) x.client = to; });
+    s.nonBillable = s.nonBillable.map(c => c === from ? to : c).filter((c, i, a) => a.indexOf(c) === i);
+    state.inv = null;
+    clearTimeout(cfgTimer); await track(db.saveConfig(state.config));
+    if (state.saveError) throw new Error(state.saveError);
+    let moved = 0;
+    for (const d of [...new Set(state.data.rows.filter(r => r.client === from).map(r => r.date))].sort()) {
+      state.data.rows.forEach(r => { if (r.date === d && r.client === from) { r.client = to; moved++; } });
+      await saveDay(d);
+      if (state.saveError) throw new Error(state.saveError + ' (reload the page, then merge again)');
+    }
+    return moved;
+  }
   function renderSetup(el) {
     const s = state.settings, cfg = state.config;
     const used = new Map();
@@ -1805,6 +1835,14 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
             <button class="btn btn-small" type="submit">Add project</button>
           </form>
           <datalist id="clientCodes">${clientsList().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+          <h3 style="margin-top:16px">Merge or rename a client</h3>
+          <p class="note">Moves every timesheet entry, project, rate, billing set-up, invoice record, material and Other item from one client code to another. Where both clients have a project with the same name, the hours join together and the second client's rate and billing are kept. Type a new code to rename.</p>
+          <form id="mergeCli" class="add-lines" style="align-items:end">
+            <label class="field"><span>Move client</span><select id="mgFrom" style="width:12em">${allClientCodes().map(c => `<option>${esc(c)}</option>`).join('')}</select></label>
+            <label class="field"><span>Into client</span><input type="text" id="mgTo" list="clientCodes" required style="width:12em"></label>
+            <button class="btn btn-small" type="submit" id="mgBtn">Merge</button>
+          </form>
+          <p class="note" id="mgInfo"></p>
         </div>
 
         <div class="panel" style="grid-column:1 / -1">
@@ -1878,6 +1916,22 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       if (cfg.projects.some(p => p.client === client && p.project === project)) { toast('That project already exists.'); return; }
       cfg.projects.push({ client, project, rate: +$('#npRate').value || 0 });
       saved(); renderSetup(el); toast(`Added ${client} | ${project}`);
+    };
+    const mgInfo = () => {
+      const from = $('#mgFrom').value, to = $('#mgTo').value.trim(), n = state.data.rows.filter(r => r.client === from);
+      const btn = $('#mgBtn'); delete btn.dataset.armed; btn.textContent = 'Merge';
+      $('#mgInfo').textContent = from ? `${from}: ${n.length} timesheet entries, ${hrs(n.reduce((a, r) => a + (+r.hours || 0), 0))} hours, projects ${projectsFor(from).join(', ') || 'none'}.` + (to && to !== from ? ` They will move to ${to}${clientsList().includes(to) ? ' (projects ' + (projectsFor(to).join(', ') || 'none') + ')' : ' (new code)'}.` : '') : '';
+    };
+    $('#mgFrom').onchange = mgInfo; $('#mgTo').oninput = mgInfo; mgInfo();
+    $('#mergeCli').onsubmit = async e => {
+      e.preventDefault();
+      const from = $('#mgFrom').value, to = $('#mgTo').value.trim(), btn = $('#mgBtn');
+      if (!from || !to || from === to) { toast('Choose two different client codes.'); return; }
+      if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = `Confirm: merge ${from} into ${to}`; return; }
+      btn.disabled = true;
+      try { const n = await mergeClient(from, to); toast(`Merged ${from} into ${to}: ${n} timesheet entries moved.`, 5000); }
+      catch (err) { toast('Merge not finished: ' + err.message + '. Run it again to complete.', 8000); }
+      renderSetup(el);
     };
     $$('[data-tg]', el).forEach(inp => inp.onchange = () => {
       const m = inp.dataset.tg, cur = targetParts(m);
