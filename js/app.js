@@ -12,6 +12,43 @@
   const CAT_COLORS = { Consulting: 'var(--accent)', Landscaping: 'var(--soil)', Admin: 'var(--muted)', Travel: 'var(--warn)' };
   const clone = o => JSON.parse(JSON.stringify(o));
 
+  // Three-way merge of settings: base = copy last loaded/saved, mine = this tab, theirs = what the site now holds.
+  // Changes from both sides are kept; where both changed the same value, this tab wins.
+  // Projects are matched by client|project so a project added in one place is never dropped by another.
+  function merge3(base, mine, theirs) {
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (same(mine, base)) return theirs;
+    if (same(theirs, base) || same(mine, theirs)) return mine;
+    const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+    if (isObj(mine) && isObj(theirs)) {
+      const b = isObj(base) ? base : {}, out = {};
+      for (const k of new Set([...Object.keys(theirs), ...Object.keys(mine)])) {
+        const v = merge3(b[k], mine[k], theirs[k]);
+        if (v !== undefined) out[k] = v;
+      }
+      return out;
+    }
+    if (Array.isArray(mine) && Array.isArray(theirs)) {
+      const b = Array.isArray(base) ? base : [];
+      const prim = a => a.every(v => v === null || typeof v !== 'object');
+      if (prim(mine) && prim(theirs) && prim(b)) {
+        const added = mine.filter(v => !b.includes(v)), removed = b.filter(v => !mine.includes(v));
+        return [...theirs.filter(v => !removed.includes(v)), ...added.filter(v => !theirs.includes(v))];
+      }
+      const keyOf = v => v && typeof v === 'object' && 'client' in v && 'project' in v && !('item' in v) ? v.client + '|' + v.project : null;
+      if ([...mine, ...theirs].length && [...mine, ...theirs, ...b].every(v => keyOf(v))) {
+        const map = a => new Map(a.map(v => [keyOf(v), v]));
+        const bm = map(b), mm = map(mine), tm = map(theirs), out = [];
+        for (const k of new Set([...tm.keys(), ...mm.keys()])) {
+          const v = merge3(bm.get(k), mm.get(k), tm.get(k));
+          if (v !== undefined) out.push(v);
+        }
+        return out;
+      }
+    }
+    return mine;
+  }
+
   // ---------- browser storage (only used when the server database is not reachable) ----------
   const store = {
     get(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
@@ -21,18 +58,31 @@
 
   // ---------- database ----------
   // Server mode: Netlify function /api/db (Netlify Blobs). Local mode: this browser only (preview / offline).
+  const onSite = /netlify\.app$/.test(location.hostname);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   const db = {
     mode: 'server',
+    base: null, // savedAt of the settings this tab last loaded or saved; the server refuses saves from an older copy
+    async getJSON(url) {
+      const r = await fetch(url, { headers: { accept: 'application/json' }, cache: 'no-store' });
+      if (!r.ok) throw new Error('db ' + r.status);
+      if (!(r.headers.get('content-type') || '').includes('json')) throw new Error('not json');
+      return r.json();
+    },
     async load() {
-      try {
-        const r = await fetch('/api/db', { headers: { accept: 'application/json' } });
-        if (!r.ok) throw new Error('db ' + r.status);
-        const ct = r.headers.get('content-type') || '';
-        if (!ct.includes('json')) throw new Error('not json');
-        this.mode = 'server';
-        return await r.json();
-      } catch {
+      // On the live site, try a few times before falling back, so a brief network blip
+      // does not silently switch the app to "this browser only" (changes would not reach the site).
+      const tries = onSite ? 3 : 1;
+      for (let i = 0; i < tries; i++) {
+        try {
+          const j = await this.getJSON('/api/db');
+          this.mode = 'server'; this.base = (j.config && j.config.savedAt) || null;
+          return j;
+        } catch { if (i < tries - 1) await sleep(1000 * (i + 1)); }
+      }
+      {
         this.mode = 'local';
+        if (onSite) setTimeout(() => toast('Could not reach the app database. Changes will NOT be saved to the site until you reload the page.', 10000), 500);
         const l = store.get('gs.db', null);
         return { entries: (l && l.entries) || [], config: (l && l.config) || null, empty: !l };
       }
@@ -50,11 +100,26 @@
     },
     async saveConfig(config) {
       if (this.mode === 'local') return this.saveLocal();
-      return this.send('/api/db?config=1', 'PUT', { config });
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const sent = clone(config);
+        const r = await fetch('/api/db?config=1', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config: sent, base: this.base }) });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) { this.base = j.savedAt || this.base; state.baseConfig = sent; return j; }
+        if (r.status !== 409 || !j.config) throw new Error(j.error || 'Save failed (' + r.status + ')');
+        // Another tab or device saved since this tab loaded: keep both sets of changes, then save again.
+        const theirs = normaliseConfig(j.config);
+        const merged = merge3(state.baseConfig || theirs, clone(state.config), theirs);
+        this.base = j.config.savedAt || null; state.baseConfig = clone(theirs);
+        applyConfig(merged); config = state.config;
+        if (['setup', 'dashboard'].includes(state.view)) route();
+      }
+      throw new Error('settings keep changing in another tab, reload the page');
     },
     async importAll(entries, config, from) {
       if (this.mode === 'local') { state.data.rows = entries; return this.saveLocal(); }
-      return this.send('/api/db?import=1', 'POST', { entries, config, from });
+      const j = await this.send('/api/db?import=1', 'POST', { entries, config, from });
+      this.base = undefined; // next settings save follows the import, so skip the stale check once
+      return j;
     }
   };
 
@@ -110,7 +175,10 @@
     const chip = $('#dataChip');
     if (state.saveError) { chip.textContent = 'Not saved, check connection'; chip.className = 'chip bad'; return; }
     if (state.saving) { chip.textContent = 'Saving ...'; chip.className = 'chip'; return; }
-    if (db.mode === 'local') { chip.textContent = 'Saved in this browser only'; chip.className = 'chip warn'; chip.title = 'The app database is available once deployed to Netlify'; return; }
+    if (db.mode === 'local') {
+      if (onSite) { chip.textContent = 'Not connected: reload to save'; chip.className = 'chip bad'; chip.title = 'The app database could not be reached when this page loaded. Changes made now stay in this browser only. Reload the page.'; return; }
+      chip.textContent = 'Saved in this browser only'; chip.className = 'chip warn'; chip.title = 'The app database is available once deployed to Netlify'; return;
+    }
     chip.textContent = state.lastSaved ? 'All changes saved' : 'Saved on your Netlify site';
     chip.className = 'chip ok'; chip.title = '';
   }
@@ -1710,7 +1778,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const s = state.settings, cfg = state.config;
     const used = new Map();
     for (const r of state.data.rows) if (r.client) used.set(r.client + '|' + r.project, (used.get(r.client + '|' + r.project) || 0) + r.hours);
-    const billKeys = [...new Set([...Object.keys(s.projects), ...[...used.keys()].filter(k => isBillable(k.split('|')[0]))])].sort();
+    const billKeys = [...new Set([...Object.keys(s.projects), ...[...used.keys(), ...cfg.projects.map(p => p.client + '|' + p.project)].filter(k => isBillable(k.split('|')[0]))])].sort();
     const contacts = Object.keys(s.contacts).sort();
     const projects = cfg.projects.slice().sort((a, b) => (a.client + a.project).localeCompare(b.client + b.project));
     const t = todayISO();
@@ -1761,11 +1829,11 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         <div class="panel-head"><h2>Who each project is billed to</h2><span class="note">Fills the draft invoice. "Client|*" covers every project for that client. Use {month} in a heading to insert the invoice month.</span></div>
         <div class="table-wrap"><table class="setup-table">
           <thead><tr><th>Client | Project</th><th>Xero contact</th><th>Reference / PO</th><th>Invoice heading</th><th>Due</th><th>Schedule</th></tr></thead>
-          <tbody>${billKeys.map(k => { const p = s.projects[k] || { contact: '', reference: '', header: '', due: '20th' }; return `<tr data-key="${esc(k)}">
+          <tbody>${billKeys.map(k => { const p = s.projects[k] || { contact: '', reference: '', header: '', due: '20th' }, all = s.projects[k.split('|')[0] + '|*'] || {}, ph = f => !s.projects[k] && all[f] ? ` placeholder="${esc(all[f])}"` : ''; return `<tr data-key="${esc(k)}">
             <td class="key">${esc(k.replace('|', ' | '))}${p.check ? ' <span class="chip warn">check</span>' : ''}</td>
-            <td><input type="text" data-f="contact" value="${esc(p.contact)}" list="contactList2" aria-label="Xero contact for ${esc(k)}"></td>
-            <td><input type="text" data-f="reference" value="${esc(p.reference)}" aria-label="Reference for ${esc(k)}"></td>
-            <td><input type="text" data-f="header" value="${esc(p.header)}" aria-label="Heading for ${esc(k)}"></td>
+            <td><input type="text" data-f="contact" value="${esc(p.contact)}"${ph('contact')} list="contactList2" aria-label="Xero contact for ${esc(k)}"></td>
+            <td><input type="text" data-f="reference" value="${esc(p.reference)}"${ph('reference')} aria-label="Reference for ${esc(k)}"></td>
+            <td><input type="text" data-f="header" value="${esc(p.header)}"${ph('header')} aria-label="Heading for ${esc(k)}"></td>
             <td><select data-f="due" aria-label="Due date rule for ${esc(k)}">${[['20th', '20th of next month'], ['7', '7 days'], ['3', '3 days'], ['2', '2 days'], ['14', '14 days'], ['30', '30 days']].map(([v, tx]) => `<option value="${v}" ${String(p.due) === v ? 'selected' : ''}>${tx}</option>`).join('')}</select></td>
             <td><select data-f="schedule" aria-label="Schedule type for ${esc(k)}"><option value="">Standard</option><option value="sf" ${p.schedule === 'sf' ? 'selected' : ''}>Sports fields</option><option value="land" ${p.schedule === 'land' ? 'selected' : ''}>Landscaping</option></select></td></tr>`; }).join('')}</tbody>
         </table></div>
@@ -1895,6 +1963,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     const oldSettings = store.get('gs.settings', null);
     if (!cfg && oldSettings) cfg = { settings: oldSettings };
     applyConfig(cfg);
+    state.baseConfig = clone(state.config);
     setRows(res.entries || []);
     state.firstRun = !!res.empty && !(res.entries || []).length;
     pickDates();
@@ -1902,4 +1971,20 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     route();
     checkXero();
   })();
+
+  // When you come back to this tab, pick up settings changed in another tab or on another device,
+  // so this tab is not working from an old copy.
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible' || db.mode !== 'server' || !state.data || state.saving) return;
+    try {
+      const { config } = await db.getJSON('/api/db?config=1');
+      if (!config || config.savedAt === db.base || state.saving) return;
+      const theirs = normaliseConfig(config);
+      const changedHere = state.baseConfig && JSON.stringify(state.config) !== JSON.stringify(state.baseConfig);
+      applyConfig(changedHere ? merge3(state.baseConfig, clone(state.config), theirs) : theirs);
+      db.base = config.savedAt; state.baseConfig = clone(theirs);
+      if (changedHere) saveSettings();
+      if (['setup', 'dashboard'].includes(state.view)) route();
+    } catch { /* offline: the next save will sort it out */ }
+  });
 })();
