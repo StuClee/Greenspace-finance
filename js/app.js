@@ -454,7 +454,7 @@
               <td><span class="cat-dot" style="background:${CAT_COLORS[c]}"></span>${c}</td><td class="num">${hrs(s.categoryHours[c])} h</td><td class="num">${money(s.categories[c] || 0)}</td></tr>`).join('')}</tbody>
           </table></div>
         </div>
-        <div class="panel">${readyToInvoiceHTML(C.addMonths(C.monthKey(t), -1), C.monthKey(t))}</div>
+        <div class="panel">${notInvoicedHTML(C.addMonths(C.monthKey(t), -1))}</div>
       </div>`;
 
     $('#dMonth').onchange = e => { state.dashMonth = e.target.value; renderDashboard(el); };
@@ -488,28 +488,23 @@
   function isInvoiced(mk, client, projects) {
     return state.settings.invoiced.find(i => i.month === mk && i.client === client && projects.every(p => i.projects.includes(p)));
   }
-  function readyToInvoiceHTML(prevMk, curMk) {
-    const block = mk => {
-      const groups = invoiceGroups(mk);
-      if (!groups.length) return `<p class="muted">No billable time in ${C.monthLabel(mk)}.</p>`;
-      return `<div class="table-wrap"><table>
-        <thead><tr><th>Bill to</th><th>Projects</th><th class="num">Hours</th><th class="num">Excl GST</th><th>Status</th><th></th></tr></thead>
-        <tbody>${groups.map(gx => {
-          const done = isInvoiced(mk, gx.client, gx.projects);
-          const total = gx.amount + gx.kmAmt;
-          return `<tr>
+  // Previous month billable work that has not yet been invoiced.
+  function notInvoicedHTML(mk) {
+    const groups = invoiceGroups(mk).filter(gx => !isInvoiced(mk, gx.client, gx.projects));
+    const head = `<div class="panel-head"><h2>Previous month work not invoiced</h2><span class="note">${C.monthLabel(mk)}</span></div>`;
+    if (!groups.length) return head + `<p class="muted">All billable work for ${C.monthLabel(mk)} has been invoiced.</p>`;
+    const tH = groups.reduce((a, g) => a + g.hours, 0), tA = groups.reduce((a, g) => a + g.amount + g.kmAmt, 0);
+    return head + `<div class="table-wrap"><table>
+        <thead><tr><th>Bill to</th><th>Projects</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
+        <tbody>${groups.map(gx => `<tr>
             <td>${esc(gx.contact)}${gx.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(gx.reference)}</div>` : ''}</td>
             <td>${esc(gx.client)}: ${gx.projects.map(esc).join(', ')}</td>
-            <td class="num">${hrs(gx.hours)}</td><td class="num">${money(total)}</td>
-            <td>${done ? `<span class="chip ok">${done.number ? esc(done.number) : 'Invoiced'}</span>` : '<span class="chip warn">To do</span>'}</td>
+            <td class="num">${hrs(gx.hours)}</td><td class="num">${money(gx.amount + gx.kmAmt)}</td>
             <td style="white-space:nowrap"><button class="btn btn-small btn-ghost" data-prep='${esc(JSON.stringify([gx.client, gx.projects, mk]))}'>Prepare</button>
-            ${done ? '' : `<button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-mkinv='${esc(JSON.stringify({ month: mk, client: gx.client, projects: gx.projects }))}'>Done</button>`}</td>
-          </tr>`;
-        }).join('')}</tbody></table></div>`;
-    };
-    return `<div class="panel-head"><h2>Ready to invoice</h2><span class="note">Billable time grouped the way you bill it</span></div>
-      <h3 style="margin:4px 0 8px">${C.monthLabel(prevMk)}</h3>${block(prevMk)}
-      <h3 style="margin:18px 0 8px">${C.monthLabel(curMk)} so far</h3>${block(curMk)}`;
+            <button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-mkinv='${esc(JSON.stringify({ month: mk, client: gx.client, projects: gx.projects }))}'>Done</button></td>
+          </tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="2">Total not invoiced</td><td class="num">${hrs(tH)}</td><td class="num">${money(tA)}</td><td></td></tr></tfoot>
+      </table></div>`;
   }
 
   function drawDashboardCharts(s, months, isCurrent) {
