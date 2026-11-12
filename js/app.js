@@ -183,7 +183,8 @@
   const state = {
     config: null, settings: null, data: null, view: 'dashboard', dayBase: {},
     tsDate: null, tsMonth: null, dashMonth: null, editing: null,
-    inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, saving: 0
+    inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, pcharts: {}, saving: 0,
+    perf: { mode: 'months', cache: {}, data: null, loading: false, error: null, allLines: false }
   };
 
   function applyConfig(cfg) {
@@ -282,7 +283,7 @@
   $('#fileInput').addEventListener('change', e => { importWorkbook(e.target.files[0], $('#impFrom')?.value); e.target.value = ''; });
 
   // ---------- routing ----------
-  const VIEWS = ['dashboard', 'timesheet', 'invoicing', 'landscaping', 'setup'];
+  const VIEWS = ['dashboard', 'performance', 'timesheet', 'invoicing', 'landscaping', 'setup'];
   function route() {
     let h = (location.hash || '').replace('#', '');
     if (h === 'materials') h = 'landscaping';
@@ -293,7 +294,7 @@
     if (!state.data) { $('#view-loading').hidden = false; return; }
     if (state.firstRun && state.view !== 'setup') { renderWelcome($('#view-empty')); $('#view-empty').hidden = false; return; }
     const el = $('#view-' + state.view); el.hidden = false;
-    ({ dashboard: renderDashboard, timesheet: renderTimesheet, invoicing: renderInvoicing, landscaping: renderMaterials, setup: renderSetup })[state.view](el);
+    ({ dashboard: renderDashboard, performance: renderPerformance, timesheet: renderTimesheet, invoicing: renderInvoicing, landscaping: renderMaterials, setup: renderSetup })[state.view](el);
   }
   window.addEventListener('hashchange', route);
   const go = v => { if (location.hash === '#' + v) route(); else location.hash = v; };
@@ -540,6 +541,403 @@
     });
   }
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (state.view === 'dashboard' && state.data) route(); });
+
+
+  // ======================================================================
+  // PERFORMANCE (financial year to date from Xero, against the same point last year)
+  // ======================================================================
+  const FY_MONTHS = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
+  const nzToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Pacific/Auckland' }).format(new Date());
+  const shortDate = s => { const d = C.parseISO(s); return `${d.getUTCDate()} ${C.MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`; };
+  const moneyK = n => { const a = Math.abs(n || 0), s = n < 0 ? '-' : ''; return a >= 1e6 ? `${s}$${(a / 1e6).toFixed(2)}m` : a >= 1e4 ? `${s}$${Math.round(a / 1e3)}k` : a >= 1e3 ? `${s}$${(a / 1e3).toFixed(1)}k` : money0(n); };
+  const pctTxt = (n, dp = 1) => (n == null || !isFinite(n)) ? '-' : (Math.round(n * 1000) / 10).toFixed(dp).replace(/\.0$/, '') + '%';
+  const signMoney = n => (n > 0 ? '+' : n < 0 ? '-' : '') + moneyK(Math.abs(n));
+
+  function perfAsAt(mode) {
+    const t = nzToday();
+    return mode === 'today' ? t : C.addDays(C.monthStart(C.monthKey(t)), -1); // last day of the previous month
+  }
+  async function loadPerf(force) {
+    const P = state.perf;
+    const asAt = perfAsAt(P.mode);
+    P.loading = true; P.error = null;
+    try {
+      const r = await fetch('/api/xero-performance?asAt=' + asAt, { headers: { accept: 'application/json' } });
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw Object.assign(new Error('The Performance page reads from Xero, which works once the app runs on Netlify.'), { local: true });
+      const j = await r.json();
+      if (!r.ok) throw Object.assign(new Error(j.error || 'Xero request failed (' + r.status + ')'), { needsReconnect: j.needsReconnect });
+      P.cache[asAt] = j; P.data = j;
+    } catch (e) { P.error = e; P.data = null; }
+    P.loading = false;
+    if (state.view === 'performance') route();
+  }
+
+  // Everything the page shows, worked out from the Xero data
+  function perfModel(X) {
+    const lines = new Map();
+    const add = (src, which) => (src?.lines || []).forEach(l => {
+      const k = l.group + '|' + l.key;
+      const o = lines.get(k) || { group: l.group, name: l.name, people: l.people || null, ty: 0, ly: 0 };
+      o[which] += l.value; lines.set(k, o);
+    });
+    add(X.ty, 'ty'); add(X.ly, 'ly');
+    const L = [...lines.values()].filter(l => Math.abs(l.ty) > 0.005 || Math.abs(l.ly) > 0.005);
+    const sum = (g, w) => L.filter(l => l.group === g).reduce((a, l) => a + l[w], 0);
+    const yr = w => {
+      const income = sum('income', w), other = sum('otherIncome', w), cogs = sum('cogs', w), exp = sum('expenses', w);
+      const people = { wages: 0, kiwisaver: 0, acc: 0, contractors: 0 };
+      L.forEach(l => { if (l.people) people[l.people] += l[w]; });
+      const employ = people.wages + people.kiwisaver + people.acc;
+      return { income, other, cogs, exp, gp: income - cogs, np: income + other - cogs - exp, people, employ, labour: employ + people.contractors };
+    };
+    const ty = yr('ty'), ly = yr('ly');
+
+    // Monthly series and outlook. Outlook uses completed months only: this year's pace against last
+    // year's, applied to last year's remaining months (keeps last year's seasonal pattern).
+    const mt = X.months?.ty || [], ml = X.months?.ly || [];
+    const lastIsMonthEnd = X.asAt === C.monthEnd(C.monthKey(X.asAt));
+    const done = Math.max(0, (X.nMonths || 0) - (lastIsMonthEnd ? 0 : 1));
+    const f = (m, k) => m ? (k === 'np' ? m.income + m.otherIncome - m.cogs - m.expenses : k === 'labour' ? m.people.wages + m.people.kiwisaver + m.people.acc + m.people.contractors : m[k]) : 0;
+    const part = (arr, k, a, b) => arr.slice(a, b).reduce((s, m) => s + f(m, k), 0);
+    const ratio = (a, b) => b ? a / b : 1;
+    const haveMonths = ml.some(Boolean);
+    let outlook = null;
+    if (haveMonths && done > 0) {
+      const proj = k => { const g = ratio(part(mt, k, 0, done), part(ml, k, 0, done)); return part(mt, k, 0, done) + g * part(ml, k, done, 12); };
+      const income = proj('income') + proj('otherIncome'), costs = proj('cogs') + proj('expenses');
+      outlook = { income: proj('income'), np: income - costs, lyIncome: part(ml, 'income', 0, 12), lyNp: part(ml, 'np', 0, 12), done };
+    }
+
+    // Revenue by client
+    const cty = X.clients?.ty || {}, cly = X.clients?.ly || {};
+    const names = [...new Set([...Object.keys(cty), ...Object.keys(cly)])];
+    const clients = names.map(n => ({ name: n, ty: cty[n] || 0, ly: cly[n] || 0 })).filter(c => Math.abs(c.ty) > 0.5 || Math.abs(c.ly) > 0.5).sort((a, b) => b.ty - a.ty || b.ly - a.ly);
+    const cTot = { ty: clients.reduce((a, c) => a + c.ty, 0), ly: clients.reduce((a, c) => a + c.ly, 0) };
+
+    // Balance sheet and debtor days (receivables include GST, so compare with revenue incl GST)
+    const bs = X.bs;
+    const days = (from, to) => Math.round((C.parseISO(to) - C.parseISO(from)) / 864e5) + 1;
+    const dd = (ar, rev, from, to) => rev > 0 ? ar / (rev * 1.15) * days(from, to) : null;
+    const pos = bs ? {
+      cash: bs.bank, ar: bs.receivables, ap: bs.payables,
+      wc: [0, 1].map(i => (bs.bank[i] || 0) + (bs.currentAssets[i] || 0) - (bs.currentLiabilities[i] || 0)),
+      dd: [dd(bs.receivables[0], ty.income, X.fyStart, X.asAt), dd(bs.receivables[1], ly.income, X.lyFyStart, X.lyAsAt)]
+    } : null;
+    return { L, ty, ly, mt, ml, done, outlook, clients, cTot, pos, haveMonths };
+  }
+
+  // Change chip: green when the movement is good for the business, red when bad
+  function delta(tyV, lyV, goodWhenUp = true, asPts = false, pctOnly = false) {
+    if (lyV == null || tyV == null) return '';
+    const d = tyV - lyV;
+    if (Math.abs(d) < 0.5 && !asPts) return '<span class="delta flat">No change</span>';
+    const up = d > 0, good = goodWhenUp == null ? null : up === goodWhenUp;
+    const cls = good == null ? 'flat' : good ? 'good' : 'bad';
+    const txt = asPts ? `${up ? '+' : ''}${(d * 100).toFixed(1)} pts`
+      : pctOnly ? `${up ? '+' : ''}${pctTxt(d / Math.abs(lyV || 1))}`
+      : lyV && Math.abs(lyV) >= Math.abs(tyV) * 0.1 ? `${up ? '+' : ''}${pctTxt(d / Math.abs(lyV))} · ${signMoney(d)}` : `${signMoney(d)}`;
+    return `<span class="delta ${cls}"><span aria-hidden="true">${up ? '&#9650;' : '&#9660;'}</span>${txt}</span>`;
+  }
+  function kpi(label, tyV, lyV, { good = true, sub = '', fmt = money0, lead = false, pts = false, pctOnly = false } = {}) {
+    return `<div class="kpi ${lead ? 'lead' : ''}">
+      <span class="label">${label}</span>
+      <span class="value">${tyV == null ? '-' : fmt(tyV)}</span>
+      <span class="sub">Last year ${lyV == null ? '-' : fmt(lyV)} ${delta(tyV, lyV, good, pts, pctOnly)}</span>
+      ${sub ? `<span class="sub">${sub}</span>` : ''}
+    </div>`;
+  }
+
+  function renderPerformance(el) {
+    const P = state.perf;
+    const asAt = perfAsAt(P.mode);
+    if (P.cache[asAt]) P.data = P.cache[asAt];
+    else if (!P.loading && !P.error) loadPerf();
+    const X = P.cache[asAt] || null;
+    const fyLabel = d => { const [y, m] = d.split('-').map(Number); const s = m > 3 ? y : y - 1; return `${s}/${String(s + 1).slice(2)}`; };
+
+    const head = `
+      <div class="view-head">
+        <div><div class="label">Financial performance</div><h1>${fyLabel(asAt)} year to date</h1>
+          <div class="note">${X ? `1 Apr ${X.fyStart.slice(0, 4)} to ${shortDate(X.asAt)}, against 1 Apr ${X.lyFyStart.slice(0, 4)} to ${shortDate(X.lyAsAt)} · from Xero, accrual basis, excl GST` : 'From Xero, compared with the same point last year'}</div></div>
+        <div class="controls">
+          <div class="seg" role="group" aria-label="Period">
+            <button data-pmode="months" aria-pressed="${P.mode === 'months'}" title="Invoices are dated at month end, so completed months give the fairest comparison">To end of ${C.MONTHS[C.parseISO(perfAsAt('months')).getUTCMonth()]}</button>
+            <button data-pmode="today" aria-pressed="${P.mode === 'today'}">To today</button>
+          </div>
+          <button class="btn btn-quiet btn-small" id="pRefresh" ${P.loading ? 'disabled' : ''}>${P.loading ? 'Loading ...' : 'Refresh'}</button>
+        </div>
+      </div>`;
+
+    if (!X) {
+      let body = '<div class="panel"><p class="muted">Getting the figures from Xero ...</p></div>';
+      if (P.error && !P.loading) {
+        const e = P.error;
+        body = e.local ? `<div class="callout">${esc(e.message)}</div>`
+          : e.needsReconnect ? `<div class="panel"><h2>Allow Xero reports</h2><p>This page reads the profit and loss and balance sheet reports, which need one more permission in Xero. Reconnect once and approve it; draft invoicing keeps working as before.</p>
+              <p><a class="btn" href="/api/xero-connect?back=performance">Reconnect Xero</a></p><p class="note">Xero said: ${esc(e.message)}</p></div>`
+          : `<div class="callout">Could not get the figures from Xero: ${esc(e.message)} <button class="btn btn-small btn-quiet" id="pRetry">Try again</button></div>`;
+      }
+      el.innerHTML = head + body;
+      wirePerfHead(el);
+      if ($('#pRetry')) $('#pRetry').onclick = () => { loadPerf(true); route(); };
+      return;
+    }
+
+    const M = perfModel(X);
+    const { ty, ly, pos, outlook } = M;
+    const margin = (a, b) => b ? a / b : null;
+    const top = M.clients[0];
+    const updated = new Date(X.fetchedAt).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' });
+
+    el.innerHTML = head + `
+      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect ? ' · <a href="/api/xero-connect?back=performance">Reconnect Xero</a> to allow reports.' : ''}</div>` : ''}
+
+      <div class="kpis">
+        ${kpi('Revenue', ty.income, ly.income, { lead: true, sub: outlook ? `Full-year outlook ${moneyK(outlook.income)} (last year ${moneyK(outlook.lyIncome)})` : '' })}
+        ${kpi('Gross profit', ty.gp, ly.gp, { sub: `Margin ${pctTxt(margin(ty.gp, ty.income))} (last year ${pctTxt(margin(ly.gp, ly.income))})` })}
+        ${kpi('Operating expenses', ty.exp, ly.exp, { good: false, sub: `${pctTxt(margin(ty.exp, ty.income))} of revenue (last year ${pctTxt(margin(ly.exp, ly.income))})` })}
+        ${kpi('Net profit', ty.np, ly.np, { sub: `Margin ${pctTxt(margin(ty.np, ty.income))} (last year ${pctTxt(margin(ly.np, ly.income))})${outlook ? ` · outlook ${moneyK(outlook.np)}` : ''}` })}
+      </div>
+
+      ${pos ? `<div class="kpis kpis-quiet">
+        ${kpi(`Cash at bank`, pos.cash[0], pos.cash[1], { sub: `At ${shortDate(X.asAt)}` })}
+        ${kpi('Owed to you', pos.ar[0], pos.ar[1], { good: null, sub: pos.dd[0] != null ? `About ${Math.round(pos.dd[0])} days of sales (last year ${pos.dd[1] != null ? Math.round(pos.dd[1]) : '-'})` : 'Incl GST' })}
+        ${kpi('You owe suppliers', pos.ap[0], pos.ap[1], { good: false, sub: 'Accounts payable, incl GST' })}
+        ${kpi('Working capital', pos.wc[0], pos.wc[1], { sub: 'Bank + current assets - current liabilities' })}
+      </div>` : ''}
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Cumulative revenue</h2>
+            <div class="legend"><span><i style="background:var(--accent)"></i>This year</span><span><i class="dash" style="--c:var(--soil)"></i>Last year</span>${outlook ? '<span><i class="dot" style="--c:var(--accent)"></i>Outlook</span>' : ''}</div></div>
+          <div class="chart-box"><canvas id="pCum" aria-label="Cumulative revenue this year against last year"></canvas></div>
+          ${outlook ? `<p class="note">Outlook: the completed months' pace against last year, applied to last year's remaining months. It keeps last year's seasonal pattern.</p>` : ''}
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>What changed net profit</h2><span class="note">Last year to this year, same period</span></div>
+          <div class="chart-box tall"><canvas id="pBridge" aria-label="Net profit bridge from last year to this year"></canvas></div>
+        </div>
+      </div>
+
+      ${wagesHTML(M, X)}
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Net profit by month</h2>
+            <div class="legend"><span><i style="background:var(--accent)"></i>This year</span><span><i style="background:var(--soil)"></i>Last year</span></div></div>
+          <div class="chart-box"><canvas id="pMonths" aria-label="Net profit by month, this year and last year"></canvas></div>
+          ${P.mode === 'today' ? `<p class="note">${C.monthLabel(C.monthKey(X.asAt))} is part way through. Invoices are dated at month end, so it will look low until then.</p>` : ''}
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Revenue by client</h2><span class="note">Invoices less credit notes, excl GST</span></div>
+          ${top && M.cTot.ty ? `<p class="note" style="margin-top:-6px">${esc(top.name)} is ${pctTxt(top.ty / M.cTot.ty, 0)} of revenue this year${M.cTot.ly && top.ly ? ` (${pctTxt(top.ly / M.cTot.ly, 0)} last year)` : ''}.</p>` : ''}
+          <div class="table-wrap"><table>
+            <thead><tr><th>Client</th><th class="num">This year</th><th class="num">Last year</th><th class="num">Change</th><th>Share</th></tr></thead>
+            <tbody>${M.clients.map(c => `<tr>
+              <td>${esc(c.name)}</td><td class="num">${money0(c.ty)}</td><td class="num muted">${money0(c.ly)}</td>
+              <td class="num">${!c.ly ? '<span class="delta good">New</span>' : !c.ty ? '<span class="delta bad">None yet</span>' : delta(c.ty, c.ly)}</td>
+              <td><div class="bar-cell"><span class="bar" style="flex:none;width:${M.cTot.ty ? Math.max(2, Math.round(c.ty / M.cTot.ty * 100)) : 0}px"></span><span class="muted num">${M.cTot.ty ? Math.round(c.ty / M.cTot.ty * 100) : 0}%</span></div></td>
+            </tr>`).join('') || '<tr><td colspan="5" class="muted">No invoices in either period.</td></tr>'}</tbody>
+            <tfoot><tr><td>Total</td><td class="num">${money0(M.cTot.ty)}</td><td class="num">${money0(M.cTot.ly)}</td><td class="num">${delta(M.cTot.ty, M.cTot.ly)}</td><td></td></tr></tfoot>
+          </table></div>
+        </div>
+      </div>
+
+      ${pnlTableHTML(M)}
+      <p class="note">Updated from Xero at ${updated}. Refresh picks up anything entered in Xero since.</p>`;
+
+    wirePerfHead(el);
+    $$('[data-pnl-all]', el).forEach(b => b.onclick = () => { P.allLines = !P.allLines; renderPerformance(el); });
+    drawPerfCharts(M, X);
+  }
+  function wirePerfHead(el) {
+    $$('[data-pmode]', el).forEach(b => b.onclick = () => { state.perf.mode = b.dataset.pmode; state.perf.error = null; renderPerformance(el); });
+    $('#pRefresh', el).onclick = () => { delete state.perf.cache[perfAsAt(state.perf.mode)]; loadPerf(true); route(); };
+  }
+
+  // ---------- wages ----------
+  function wagesHTML(M, X) {
+    const { ty, ly } = M;
+    if (!ty.labour && !ly.labour) return '';
+    const per = (a, b) => b ? a / b : null;
+    const rows = [
+      ['Wages and salaries', 'wages'], ['KiwiSaver employer contributions', 'kiwisaver'], ['ACC levies', 'acc'], ['Sub-contractors', 'contractors']
+    ].filter(([, k]) => ty.people[k] || ly.people[k]);
+    const ch = ty.employ - ly.employ, cch = ty.people.contractors - ly.people.contractors;
+    const story = [];
+    if (ly.employ) story.push(`Employee costs (wages, KiwiSaver and ACC) are ${ch <= 0 ? 'down' : 'up'} ${moneyK(Math.abs(ch))} (${pctTxt(Math.abs(ch) / ly.employ)}) while revenue is ${ty.income >= ly.income ? 'up' : 'down'} ${pctTxt(Math.abs(ty.income - ly.income) / (ly.income || 1))}.`);
+    if (ty.employ && ly.employ) story.push(`Each $1 of employee cost brought in ${money(ty.income / ty.employ)} of revenue, against ${money(ly.income / ly.employ)} last year.`);
+    if (cch > 0 && ch < 0) story.push(`Sub-contractor costs rose ${moneyK(cch)}, taking back ${pctTxt(cch / Math.abs(ch), 0)} of the saving on employee costs.`);
+    else if (cch) story.push(`Sub-contractor costs are ${cch > 0 ? 'up' : 'down'} ${moneyK(Math.abs(cch))}.`);
+    story.push(`All labour together (employees and sub-contractors) is ${pctTxt(per(ty.labour, ty.income))} of revenue, against ${pctTxt(per(ly.labour, ly.income))} last year.`);
+
+    // Cost per hour from the app's own timesheet, for completed months that have timesheet entries
+    const months = state.data ? C.monthsInData(state.data) : [];
+    const fyStartMk = X.fyStart.slice(0, 7);
+    const hourRows = [];
+    for (let i = 0; i < M.done; i++) {
+      const mk = C.addMonths(fyStartMk, i), m = M.mt[i];
+      if (!m || !months.includes(mk)) continue;
+      const s = C.monthStats(state.data, mk);
+      if (!s.hours) continue;
+      const cost = m.people.wages + m.people.kiwisaver + m.people.acc;
+      hourRows.push({ mk, hours: s.hours, cost, perHour: cost / s.hours, earned: s.revenue / s.hours });
+    }
+
+    return `<div class="panel wages">
+      <div class="panel-head"><h2>Wages and labour</h2><span class="note">From the wages, KiwiSaver, ACC and sub-contractor accounts in Xero</span></div>
+      <div class="kpis kpis-quiet">
+        ${kpi('Employee costs', ty.employ, ly.employ, { good: false, sub: 'Wages + KiwiSaver + ACC' })}
+        ${kpi('Employee costs / revenue', per(ty.employ, ty.income), per(ly.employ, ly.income), { good: false, pts: true, fmt: v => pctTxt(v) })}
+        ${kpi('Revenue per $1 of wages', per(ty.income, ty.employ), per(ly.income, ly.employ), { fmt: v => money(v), pctOnly: true, sub: 'Revenue / employee costs' })}
+        ${kpi('Sub-contractors', ty.people.contractors, ly.people.contractors, { good: false, sub: `All labour ${pctTxt(per(ty.labour, ty.income))} of revenue (last year ${pctTxt(per(ly.labour, ly.income))})` })}
+      </div>
+      <ul class="story">${story.map(s => `<li>${s}</li>`).join('')}</ul>
+      <div class="grid-2">
+        <div>
+          <div class="panel-head"><h3>Labour cost by month</h3>
+            <div class="legend"><span><i style="background:var(--accent)"></i>Wages</span><span><i style="background:var(--good-soft)"></i>KiwiSaver + ACC</span><span><i style="background:var(--soil)"></i>Sub-contractors</span><span><i class="dash" style="--c:var(--muted)"></i>Last year total</span></div></div>
+          <div class="chart-box"><canvas id="pWages" aria-label="Labour cost by month"></canvas></div>
+        </div>
+        <div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Account</th><th class="num">This year</th><th class="num">Last year</th><th class="num">Change</th><th class="num">% of revenue</th></tr></thead>
+            <tbody>${rows.map(([n, k]) => `<tr><td>${n}</td><td class="num">${money0(ty.people[k])}</td><td class="num muted">${money0(ly.people[k])}</td><td class="num">${delta(ty.people[k], ly.people[k], false)}</td><td class="num">${pctTxt(per(ty.people[k], ty.income))} <span class="muted">(${pctTxt(per(ly.people[k], ly.income))})</span></td></tr>`).join('')}</tbody>
+            <tfoot><tr><td>Total labour</td><td class="num">${money0(ty.labour)}</td><td class="num">${money0(ly.labour)}</td><td class="num">${delta(ty.labour, ly.labour, false)}</td><td class="num">${pctTxt(per(ty.labour, ty.income))} <span class="muted">(${pctTxt(per(ly.labour, ly.income))})</span></td></tr></tfoot>
+          </table></div>
+          ${hourRows.length ? `<h3 style="margin:16px 0 8px">Against timesheet hours</h3>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Month</th><th class="num">Hours</th><th class="num">Employee cost</th><th class="num">Cost per hour</th><th class="num">Timesheet $ per hour</th></tr></thead>
+            <tbody>${hourRows.map(r => `<tr><td>${C.monthLabel(r.mk)}</td><td class="num">${hrs(r.hours)}</td><td class="num">${money0(r.cost)}</td><td class="num">${money(r.perHour)}</td><td class="num">${money(r.earned)}</td></tr>`).join('')}</tbody>
+          </table></div>
+          <p class="note">Hours are from this app's timesheet (all hours, including admin and travel). Cost per hour only makes sense if the timesheet covers everyone on the payroll.</p>` : ''}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // ---------- profit and loss table ----------
+  function pnlTableHTML(M) {
+    const { L, ty, ly } = M;
+    const P = state.perf;
+    const rev = ty.income, lrev = ly.income;
+    const row = (name, a, b, { good = true, cls = '', indent = false } = {}) => `<tr class="${cls}">
+      <td${indent ? ' class="indent"' : ''}>${esc(name)}</td><td class="num">${money0(a)}</td><td class="num muted">${money0(b)}</td>
+      <td class="num">${delta(a, b, good)}</td><td class="num muted">${rev ? pctTxt(a / rev) : '-'}</td></tr>`;
+    const group = (g, good) => L.filter(l => l.group === g).sort((a, b) => b.ty - a.ty || b.ly - a.ly);
+    let exp = group('expenses');
+    const threshold = Math.max(rev, lrev) * 0.01;
+    let hidden = [];
+    if (!P.allLines) { hidden = exp.filter(l => Math.abs(l.ty) < threshold && Math.abs(l.ly) < threshold); exp = exp.filter(l => !hidden.includes(l)); }
+    const hid = hidden.reduce((a, l) => ({ ty: a.ty + l.ty, ly: a.ly + l.ly }), { ty: 0, ly: 0 });
+    return `<div class="panel">
+      <div class="panel-head"><h2>Profit and loss against last year</h2>
+        <button class="btn btn-quiet btn-small" data-pnl-all>${P.allLines ? 'Group small lines' : 'Show every line'}</button></div>
+      <div class="table-wrap"><table class="pnl">
+        <thead><tr><th>Account</th><th class="num">This year</th><th class="num">Last year</th><th class="num">Change</th><th class="num">% of revenue</th></tr></thead>
+        <tbody>
+          ${group('income').map(l => row(l.name, l.ty, l.ly, { indent: true })).join('')}
+          ${row('Revenue', ty.income, ly.income, { cls: 'sum' })}
+          ${group('cogs').map(l => row(l.name, l.ty, l.ly, { good: false, indent: true })).join('')}
+          ${row('Gross profit', ty.gp, ly.gp, { cls: 'sum' })}
+          ${group('otherIncome').map(l => row(l.name, l.ty, l.ly, { indent: true })).join('')}
+          ${exp.map(l => row(l.name, l.ty, l.ly, { good: false, indent: true })).join('')}
+          ${hidden.length ? row(`${hidden.length} smaller expense lines`, hid.ty, hid.ly, { good: false, indent: true, cls: 'muted-row' }) : ''}
+          ${row('Operating expenses', ty.exp, ly.exp, { good: false, cls: 'sum' })}
+        </tbody>
+        <tfoot>${row('Net profit', ty.np, ly.np, { cls: 'total' })}</tfoot>
+      </table></div>
+    </div>`;
+  }
+
+  // ---------- charts ----------
+  function drawPerfCharts(M, X) {
+    if (!window.Chart) return;
+    Object.values(state.pcharts).forEach(c => c.destroy()); state.pcharts = {};
+    const ink = cssVar('--muted'), line = cssVar('--line'), acc = cssVar('--accent'), soil = cssVar('--soil'), good = cssVar('--good'), bad = cssVar('--bad'), goodSoft = cssVar('--good-soft');
+    Chart.defaults.font.family = cssVar('--f-body') || 'sans-serif';
+    Chart.defaults.color = ink;
+    const fmtK = v => moneyK(v);
+    const f = (m, k) => !m ? null : k === 'np' ? m.income + m.otherIncome - m.cogs - m.expenses : m[k];
+
+    // Cumulative revenue
+    if (M.haveMonths && $('#pCum')) {
+      const cum = (arr, upto) => { let s = 0; return FY_MONTHS.map((_, i) => { if (i >= upto || !arr[i]) return null; s += arr[i].income; return s; }); };
+      const tyN = M.mt.filter(Boolean).length;
+      const tyC = cum(M.mt, tyN), lyC = cum(M.ml, 12);
+      const ds = [
+        { label: 'This year', data: tyC, borderColor: acc, backgroundColor: acc + '22', fill: true, tension: .2, borderWidth: 2.5, pointRadius: ctx => ctx.dataIndex === tyN - 1 ? 4 : 0, pointBackgroundColor: acc },
+        { label: 'Last year', data: lyC, borderColor: soil, borderDash: [5, 4], borderWidth: 2, pointRadius: 0, fill: false, tension: .2 }
+      ];
+      if (M.outlook) {
+        const d = M.outlook.done, g = (() => { let a = 0, b = 0; for (let i = 0; i < d; i++) { a += M.mt[i]?.income || 0; b += M.ml[i]?.income || 0; } return b ? a / b : 1; })();
+        let s = M.mt.slice(0, d).reduce((a, m) => a + (m?.income || 0), 0);
+        const out = FY_MONTHS.map((_, i) => { if (i < d - 1) return null; if (i === d - 1) return s; s += g * (M.ml[i]?.income || 0); return s; });
+        ds.push({ label: 'Outlook', data: out, borderColor: acc, borderDash: [2, 4], borderWidth: 2, pointRadius: 0, fill: false, tension: .2 });
+      }
+      state.pcharts.cum = new Chart($('#pCum'), {
+        type: 'line', data: { labels: FY_MONTHS, datasets: ds },
+        options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y == null ? null : `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
+          scales: { x: { grid: { display: false } }, y: { beginAtZero: true, grid: { color: line }, ticks: { callback: fmtK } } } }
+      });
+    }
+
+    // Net profit bridge (horizontal waterfall)
+    if ($('#pBridge')) {
+      const { L, ty, ly } = M;
+      const steps = [];
+      if (ty.income - ly.income) steps.push(['Revenue', ty.income - ly.income]);
+      if (ty.cogs - ly.cogs) steps.push(['Cost of sales', -(ty.cogs - ly.cogs)]);
+      if (ty.other - ly.other) steps.push(['Other income', ty.other - ly.other]);
+      const ex = L.filter(l => l.group === 'expenses').map(l => [l.name, -(l.ty - l.ly)]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+      const big = ex.slice(0, 6), rest = ex.slice(6).reduce((a, x) => a + x[1], 0);
+      steps.push(...big);
+      if (Math.abs(rest) >= 1) steps.push([`Other expenses (${ex.length - 6})`, rest]);
+      const labels = ['Net profit last year', ...steps.map(s => s[0]), 'Net profit this year'];
+      let run = ly.np;
+      const data = [[0, ly.np]], colors = [soil];
+      steps.forEach(([, v]) => { data.push([run, run + v]); colors.push(v >= 0 ? good : bad); run += v; });
+      data.push([0, ty.np]); colors.push(acc);
+      const vals = [ly.np, ...steps.map(s => s[1]), ty.np];
+      state.pcharts.bridge = new Chart($('#pBridge'), {
+        type: 'bar',
+        data: { labels, datasets: [{ data, backgroundColor: colors, borderRadius: 3, barPercentage: .75, categoryPercentage: .9 }] },
+        options: { indexAxis: 'y', maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => { const i = c.dataIndex, v = vals[i]; return i === 0 || i === vals.length - 1 ? money0(v) : `${v >= 0 ? 'Adds' : 'Takes off'} ${money0(Math.abs(v))}`; } } } },
+          scales: { x: { grid: { color: line }, ticks: { callback: fmtK } }, y: { grid: { display: false }, ticks: { autoSkip: false, callback(v) { const s = this.getLabelForValue(v); return s.length > 26 ? s.slice(0, 25) + '...' : s; } } } } }
+      });
+    }
+
+    // Net profit by month
+    if (M.haveMonths && $('#pMonths')) {
+      state.pcharts.months = new Chart($('#pMonths'), {
+        type: 'bar',
+        data: { labels: FY_MONTHS, datasets: [
+          { label: 'This year', data: M.mt.map(m => f(m, 'np')), backgroundColor: acc, borderRadius: 3, maxBarThickness: 22 },
+          { label: 'Last year', data: M.ml.map(m => f(m, 'np')), backgroundColor: soil + '99', borderRadius: 3, maxBarThickness: 22 }
+        ] },
+        options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y == null ? null : `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
+          scales: { x: { grid: { display: false } }, y: { grid: { color: line }, ticks: { callback: fmtK } } } }
+      });
+    }
+
+    // Labour cost by month (stacked) with last year's total as a line
+    if (M.haveMonths && $('#pWages')) {
+      const p = (m, k) => m ? m.people[k] : null;
+      state.pcharts.wages = new Chart($('#pWages'), {
+        data: { labels: FY_MONTHS, datasets: [
+          { type: 'bar', label: 'Wages', data: M.mt.map(m => p(m, 'wages')), backgroundColor: acc, stack: 'ty', maxBarThickness: 30 },
+          { type: 'bar', label: 'KiwiSaver + ACC', data: M.mt.map(m => m ? m.people.kiwisaver + m.people.acc : null), backgroundColor: goodSoft, stack: 'ty', maxBarThickness: 30 },
+          { type: 'bar', label: 'Sub-contractors', data: M.mt.map(m => p(m, 'contractors')), backgroundColor: soil, stack: 'ty', maxBarThickness: 30 },
+          { type: 'line', label: 'Last year total', data: M.ml.map(m => m ? m.people.wages + m.people.kiwisaver + m.people.acc + m.people.contractors : null), borderColor: ink, borderDash: [5, 4], borderWidth: 2, pointRadius: 2, pointBackgroundColor: ink, fill: false, tension: .2, stack: 'ly' }
+        ] },
+        options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y == null ? null : `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
+          scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, beginAtZero: true, grid: { color: line }, ticks: { callback: fmtK } } } }
+      });
+    }
+  }
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (state.view === 'performance' && state.perf.data) route(); });
 
 
   // ======================================================================
