@@ -614,6 +614,14 @@
     const names = [...new Set([...Object.keys(cty), ...Object.keys(cly)])];
     const clients = names.map(n => ({ name: n, ty: cty[n] || 0, ly: cly[n] || 0 })).filter(c => Math.abs(c.ty) > 0.5 || Math.abs(c.ly) > 0.5).sort((a, b) => b.ty - a.ty || b.ly - a.ly);
     const cTot = { ty: clients.reduce((a, c) => a + c.ty, 0), ly: clients.reduce((a, c) => a + c.ly, 0) };
+    // Listed: clients over $2,000 this year. Lapsed: over $5,000 last year but under $2,000 this year.
+    // Everyone else is grouped as "Other clients", so the total still adds up to all invoiced revenue.
+    const MIN_CLIENT = 2000, MIN_LAPSED = 5000;
+    const listed = clients.filter(c => c.ty >= MIN_CLIENT);
+    const lapsed = clients.filter(c => c.ty < MIN_CLIENT && c.ly >= MIN_LAPSED).sort((a, b) => b.ly - a.ly);
+    const small = clients.filter(c => !listed.includes(c) && !lapsed.includes(c));
+    if (small.length) listed.push({ name: `Other clients (${small.length})`, ty: small.reduce((a, c) => a + c.ty, 0), ly: small.reduce((a, c) => a + c.ly, 0), other: true });
+    clients.splice(0, clients.length, ...listed);
 
     // Balance sheet and debtor days (receivables include GST, so compare with revenue incl GST)
     const bs = X.bs;
@@ -624,7 +632,7 @@
       wc: [0, 1].map(i => (bs.bank[i] || 0) + (bs.currentAssets[i] || 0) - (bs.currentLiabilities[i] || 0)),
       dd: [dd(bs.receivables[0], ty.income, X.fyStart, X.asAt), dd(bs.receivables[1], ly.income, X.lyFyStart, X.lyAsAt)]
     } : null;
-    return { L, ty, ly, mt, ml, done, outlook, clients, cTot, pos, haveMonths };
+    return { L, ty, ly, mt, ml, done, outlook, clients, lapsed, cTot, pos, haveMonths };
   }
 
   // Change chip: green when the movement is good for the business, red when bad
@@ -674,8 +682,7 @@
       if (P.error && !P.loading) {
         const e = P.error;
         body = e.local ? `<div class="callout">${esc(e.message)}</div>`
-          : e.needsReconnect ? `<div class="panel"><h2>Allow Xero reports</h2><p>This page reads the profit and loss and balance sheet reports, which need one more permission in Xero. Reconnect once and approve it; draft invoicing keeps working as before.</p>
-              <p><a class="btn" href="/api/xero-connect?back=performance">Reconnect Xero</a></p><p class="note">Xero said: ${esc(e.message)}</p></div>`
+          : e.needsReconnect ? reconnectHTML(e.message)
           : `<div class="callout">Could not get the figures from Xero: ${esc(e.message)} <button class="btn btn-small btn-quiet" id="pRetry">Try again</button></div>`;
       }
       el.innerHTML = head + body;
@@ -684,6 +691,12 @@
       return;
     }
 
+    // Reports refused (only invoices came back): ask to reconnect rather than show zeros
+    if (!X.ty && !X.ly) {
+      el.innerHTML = head + reconnectHTML((X.errors || [])[0] || 'Xero did not return the reports');
+      wirePerfHead(el);
+      return;
+    }
     const M = perfModel(X);
     const { ty, ly, pos, outlook } = M;
     const margin = (a, b) => b ? a / b : null;
@@ -730,16 +743,19 @@
           ${P.mode === 'today' ? `<p class="note">${C.monthLabel(C.monthKey(X.asAt))} is part way through. Invoices are dated at month end, so it will look low until then.</p>` : ''}
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>Revenue by client</h2><span class="note">Invoices less credit notes, excl GST</span></div>
+          <div class="panel-head"><h2>Revenue by client</h2><span class="note">Clients over $2,000 this year · invoices less credit notes, excl GST</span></div>
           ${top && M.cTot.ty ? `<p class="note" style="margin-top:-6px">${esc(top.name)} is ${pctTxt(top.ty / M.cTot.ty, 0)} of revenue this year${M.cTot.ly && top.ly ? ` (${pctTxt(top.ly / M.cTot.ly, 0)} last year)` : ''}.</p>` : ''}
           <div class="table-wrap"><table>
             <thead><tr><th>Client</th><th class="num">This year</th><th class="num">Last year</th><th class="num">Change</th><th>Share</th></tr></thead>
-            <tbody>${M.clients.map(c => `<tr>
+            <tbody>${M.clients.map(c => `<tr${c.other ? ' class="muted-row"' : ''}>
               <td>${esc(c.name)}</td><td class="num">${money0(c.ty)}</td><td class="num muted">${money0(c.ly)}</td>
-              <td class="num">${!c.ly ? '<span class="delta good">New</span>' : !c.ty ? '<span class="delta bad">None yet</span>' : delta(c.ty, c.ly)}</td>
+              <td class="num">${c.other ? delta(c.ty, c.ly) : !c.ly ? '<span class="delta good">New</span>' : !c.ty ? '<span class="delta bad">None yet</span>' : delta(c.ty, c.ly)}</td>
               <td><div class="bar-cell"><span class="bar" style="flex:none;width:${M.cTot.ty ? Math.max(2, Math.round(c.ty / M.cTot.ty * 100)) : 0}px"></span><span class="muted num">${M.cTot.ty ? Math.round(c.ty / M.cTot.ty * 100) : 0}%</span></div></td>
             </tr>`).join('') || '<tr><td colspan="5" class="muted">No invoices in either period.</td></tr>'}</tbody>
-            <tfoot><tr><td>Total</td><td class="num">${money0(M.cTot.ty)}</td><td class="num">${money0(M.cTot.ly)}</td><td class="num">${delta(M.cTot.ty, M.cTot.ly)}</td><td></td></tr></tfoot>
+            ${M.lapsed.length ? `<tbody class="lapsed">
+              <tr class="group-head"><td colspan="5">Not invoiced this year <span class="note">(over $5,000 last year)</span></td></tr>
+              ${M.lapsed.map(c => `<tr><td>${esc(c.name)}</td><td class="num">${money0(c.ty)}</td><td class="num muted">${money0(c.ly)}</td><td class="num"><span class="delta bad">${signMoney(c.ty - c.ly)}</span></td><td class="muted num">${pctTxt(c.ly / (M.cTot.ly || 1), 0)} of last year</td></tr>`).join('')}</tbody>` : ''}
+            <tfoot><tr><td>Total, all clients</td><td class="num">${money0(M.cTot.ty)}</td><td class="num">${money0(M.cTot.ly)}</td><td class="num">${delta(M.cTot.ty, M.cTot.ly)}</td><td></td></tr></tfoot>
           </table></div>
         </div>
       </div>
@@ -750,6 +766,14 @@
     wirePerfHead(el);
     $$('[data-pnl-all]', el).forEach(b => b.onclick = () => { P.allLines = !P.allLines; renderPerformance(el); });
     drawPerfCharts(M, X);
+  }
+  function reconnectHTML(msg) {
+    return `<div class="panel"><h2>Allow Xero reports</h2>
+      <p>This page reads the profit and loss and balance sheet reports, which need one more permission in Xero. Reconnect once and tick the box to allow access when Xero asks. Draft invoicing keeps working as before.</p>
+      <p style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><a class="btn" href="/api/xero-connect?back=performance">Reconnect Xero</a>
+        <a class="btn btn-quiet" href="/api/xero-connect?back=performance&reports=legacy">Reconnect with the older report permission</a></p>
+      <p class="note">Use the first button. If the page still shows this afterwards, use the second one: Xero apps created before March 2026 may only accept the older permission name.</p>
+      <p class="note">Xero said: ${esc(msg)}</p></div>`;
   }
   function wirePerfHead(el) {
     $$('[data-pmode]', el).forEach(b => b.onclick = () => { state.perf.mode = b.dataset.pmode; state.perf.error = null; renderPerformance(el); });
