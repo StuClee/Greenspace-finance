@@ -2,7 +2,15 @@
 import { getStore } from '@netlify/blobs';
 
 export const env = k => (globalThis.Netlify?.env?.get(k)) ?? process.env[k];
-export const SCOPES = () => env('XERO_SCOPES') || 'openid profile email offline_access accounting.transactions accounting.contacts.read accounting.attachments';
+const BASE_SCOPES = 'openid profile email offline_access accounting.transactions accounting.contacts.read accounting.attachments';
+// Report scopes for the Performance page. Granular names by default; ?reports=legacy (or XERO_REPORT_SCOPES) uses the older broad scope.
+export const REPORT_SCOPES = { granular: 'accounting.reports.profitandloss.read accounting.reports.balancesheet.read', legacy: 'accounting.reports.read' };
+export const SCOPES = (variant = 'granular') => {
+  const base = (env('XERO_SCOPES') || BASE_SCOPES).split(/\s+/).filter(Boolean);
+  const extra = (env('XERO_REPORT_SCOPES') || REPORT_SCOPES[variant] || REPORT_SCOPES.granular).split(/\s+/);
+  return [...new Set([...base, ...extra])].join(' ');
+};
+export const hasReportScopes = scope => !scope ? null : /accounting\.reports\.read|accounting\.reports\.profitandloss\.read/.test(scope);
 export const redirectUri = req => env('XERO_REDIRECT_URI') || new URL('/api/xero-callback', req.url).toString();
 export const configured = () => !!(env('XERO_CLIENT_ID') && env('XERO_CLIENT_SECRET'));
 const store = () => getStore('xero');

@@ -1,8 +1,8 @@
-import { configured, loadTokens, json } from './_xero.mjs';
+import { configured, loadTokens, json, hasReportScopes } from './_xero.mjs';
 export default async () => {
   if (!configured()) return json({ configured: false, connected: false });
   try {
     const t = await loadTokens();
-    return json({ configured: true, connected: !!(t && t.refresh_token), tenantName: t?.tenantName || null, connectedAt: t?.connectedAt || null });
+    return json({ configured: true, connected: !!(t && t.refresh_token), tenantName: t?.tenantName || null, connectedAt: t?.connectedAt || null, reports: hasReportScopes(t?.scope) });
   } catch (e) { return json({ configured: true, connected: false, error: e.message }); }
 };
