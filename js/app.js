@@ -2233,6 +2233,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
   // ======================================================================
   // SETUP
   // ======================================================================
+  function allProjectKeys() { return [...new Set([...state.config.projects.map(p => p.client + '|' + p.project), ...state.data.rows.filter(r => r.client).map(r => r.client + '|' + r.project)])].sort((a, b) => a.localeCompare(b)); }
   function allClientCodes() { return [...new Set([...clientsList(), ...state.data.rows.map(r => r.client).filter(Boolean)])].sort((a, b) => a.localeCompare(b)); }
   // Move everything held under client code `from` to client code `to` (merge, or rename when `to` is new).
   async function mergeClient(from, to) {
@@ -2260,6 +2261,54 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       state.data.rows.forEach(r => { if (r.date === d && r.client === from) { r.client = to; moved++; } });
       await saveDay(d);
       if (state.saveError) throw new Error(state.saveError + ' (reload the page, then merge again)');
+    }
+    return moved;
+  }
+  // Move one project (client code + project name) to a new client code and/or project name.
+  // Moves timesheet entries, the project and rate, billing set-up, schedule edits, invoice headers, invoice records and Other items.
+  async function moveProject(fc, fp, tc, tp) {
+    const cfg = state.config, s = state.settings, fromK = fc + '|' + fp, toK = tc + '|' + tp;
+    // project list and rate (if the new name already exists, it keeps its own rate)
+    if (cfg.projects.some(p => p.client === tc && p.project === tp)) cfg.projects = cfg.projects.filter(p => !(p.client === fc && p.project === fp));
+    else cfg.projects.forEach(p => { if (p.client === fc && p.project === fp) { p.client = tc; p.project = tp; } });
+    // billing set-up: the moved project's set-up wins over any default for the new name
+    if (s.projects[fromK]) { s.projects[toK] = Object.assign({}, s.projects[toK] || {}, s.projects[fromK]); delete s.projects[fromK]; }
+    // schedule day edits: client|project|date
+    for (const k of Object.keys(s.dayEdits || {})) if (k.startsWith(fromK + '|')) { const nk = toK + k.slice(fromK.length); if (!(nk in s.dayEdits)) s.dayEdits[nk] = s.dayEdits[k]; delete s.dayEdits[k]; }
+    // invoice header edits: client|p1+p2|start|end. When the client changes, the moved project leaves any shared record
+    // and joins a record already moved to the new client for the same period (so a two-project invoice stays one invoice).
+    for (const k of Object.keys(s.invMeta || {})) {
+      const [c, projs, ...rest] = k.split('|'); if (c !== fc) continue;
+      const list = projs.split('+'); if (!list.includes(fp)) continue;
+      const meta = s.invMeta[k]; delete s.invMeta[k];
+      if (tc === fc) { const nk = [tc, [...new Set(list.map(x => x === fp ? tp : x))].sort().join('+'), ...rest].join('|'); if (!(nk in s.invMeta)) s.invMeta[nk] = meta; continue; }
+      const left = list.filter(x => x !== fp); if (left.length) s.invMeta[[fc, left.join('+'), ...rest].join('|')] = meta;
+      const tail = rest.join('|'), prior = Object.keys(s.invMeta).find(x => x.startsWith(tc + '|') && x.split('|').slice(2).join('|') === tail);
+      const joined = prior ? [...new Set([...prior.split('|')[1].split('+'), tp])].sort().join('+') : tp;
+      const pm = prior ? s.invMeta[prior] : meta; if (prior) delete s.invMeta[prior];
+      s.invMeta[[tc, joined, ...rest].join('|')] = pm;
+    }
+    // invoice records, joined the same way
+    for (const i of (s.invoiced || []).slice()) {
+      if (i.client !== fc || !(i.projects || []).includes(fp)) continue;
+      if (tc === fc) { i.projects = [...new Set(i.projects.map(x => x === fp ? tp : x))]; continue; }
+      const same = x => x !== i && x.client === tc && x.month === i.month && (x.start || '') === (i.start || '') && (x.end || '') === (i.end || '') && (x.number || '') === (i.number || '');
+      const prior = s.invoiced.find(same);
+      if (prior) { if (!prior.projects.includes(tp)) prior.projects.push(tp); }
+      else if (i.projects.length > 1) s.invoiced.push(Object.assign({}, i, { client: tc, projects: [tp] }));
+      if (i.projects.length > 1) i.projects = i.projects.filter(x => x !== fp);
+      else if (prior) s.invoiced.splice(s.invoiced.indexOf(i), 1);
+      else { i.client = tc; i.projects = [tp]; }
+    }
+    (cfg.otherItems || []).forEach(o => { if (o.client === fc && o.project === fp) { o.client = tc; o.project = tp; } });
+    state.inv = null;
+    clearTimeout(cfgTimer); await track(db.saveConfig(state.config));
+    if (state.saveError) throw new Error(state.saveError);
+    let moved = 0;
+    for (const d of [...new Set(state.data.rows.filter(r => r.client === fc && r.project === fp).map(r => r.date))].sort()) {
+      state.data.rows.forEach(r => { if (r.date === d && r.client === fc && r.project === fp) { r.client = tc; r.project = tp; moved++; } });
+      await saveDay(d);
+      if (state.saveError) throw new Error(state.saveError + ' (reload the page, then move again)');
     }
     return moved;
   }
@@ -2302,6 +2351,15 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
             <button class="btn btn-small" type="submit" id="mgBtn">Merge</button>
           </form>
           <p class="note" id="mgInfo"></p>
+          <h3 style="margin-top:16px">Move or rename a project</h3>
+          <p class="note">Moves one project's timesheet entries, rate, billing set-up, schedule edits, invoice records and Other items to a new client code and/or project name. Rates and amounts already entered do not change.</p>
+          <form id="moveProj" class="add-lines" style="align-items:end">
+            <label class="field"><span>Project</span><select id="mpFrom" style="width:16em">${allProjectKeys().map(k => `<option value="${esc(k)}">${esc(k.replace('|', ' | '))}</option>`).join('')}</select></label>
+            <label class="field"><span>New client code</span><input type="text" id="mpClient" list="clientCodes" required style="width:9em"></label>
+            <label class="field"><span>New project name</span><input type="text" id="mpProject" required style="width:14em"></label>
+            <button class="btn btn-small" type="submit" id="mpBtn">Move</button>
+          </form>
+          <p class="note" id="mpInfo"></p>
         </div>
 
         <div class="panel" style="grid-column:1 / -1">
@@ -2390,6 +2448,25 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       btn.disabled = true;
       try { const n = await mergeClient(from, to); toast(`Merged ${from} into ${to}: ${n} timesheet entries moved.`, 5000); }
       catch (err) { toast('Merge not finished: ' + err.message + '. Run it again to complete.', 8000); }
+      renderSetup(el);
+    };
+    const mpInfo = () => {
+      const [fc, fp] = ($('#mpFrom').value || '|').split('|'), tc = $('#mpClient').value.trim(), tp = $('#mpProject').value.trim();
+      const n = state.data.rows.filter(r => r.client === fc && r.project === fp);
+      const btn = $('#mpBtn'); delete btn.dataset.armed; btn.textContent = 'Move';
+      $('#mpInfo').textContent = fc ? `${fc} | ${fp}: ${n.length} timesheet entries, ${hrs(n.reduce((a, r) => a + (+r.hours || 0), 0))} hours.` + (tc && tp ? ` They will move to ${tc} | ${tp}${state.config.projects.some(p => p.client === tc && p.project === tp) ? ' (already exists: hours join together)' : ''}.` : '') : '';
+    };
+    $('#mpFrom').onchange = () => { const [fc, fp] = $('#mpFrom').value.split('|'); $('#mpClient').value = fc; $('#mpProject').value = fp; mpInfo(); };
+    $('#mpClient').oninput = mpInfo; $('#mpProject').oninput = mpInfo; $('#mpFrom').onchange();
+    $('#moveProj').onsubmit = async e => {
+      e.preventDefault();
+      const [fc, fp] = $('#mpFrom').value.split('|'), tc = $('#mpClient').value.trim(), tp = $('#mpProject').value.trim(), btn = $('#mpBtn');
+      if (!fc || !tc || !tp || (tc === fc && tp === fp)) { toast('Type a new client code or project name.'); return; }
+      if (tc.includes('|') || tp.includes('|') || tp.includes('+')) { toast('Names cannot contain | or +.'); return; }
+      if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = `Confirm: move to ${tc} | ${tp}`; return; }
+      btn.disabled = true;
+      try { const n = await moveProject(fc, fp, tc, tp); toast(`Moved ${fc} | ${fp} to ${tc} | ${tp}: ${n} timesheet entries moved.`, 5000); }
+      catch (err) { toast('Move not finished: ' + err.message + '. Run it again to complete.', 8000); }
       renderSetup(el);
     };
     $$('[data-tg]', el).forEach(inp => inp.onchange = () => {
