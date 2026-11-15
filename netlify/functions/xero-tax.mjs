@@ -1,6 +1,6 @@
 import { session, xeroApi, json } from './_xero.mjs';
 
-// GET /api/xero-tax?periods=YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD
+// GET /api/xero-tax?periods=YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD&basis=payments|invoice
 // Tax position for the Tax page.
 // -> { today, fyStart, lyFyStart, bs, months, ly, gst: [{ start, end, sales, purchases }], irdPayments, errors }
 //   bs     = tax balances at today from the balance sheet: { gst, paye, deductions, wagesPayable, incomeTax, rwt }
@@ -107,6 +107,7 @@ export default async (req) => {
   const today = nzToday();
   const periods = (u.searchParams.get('periods') || '').split(',').filter(Boolean).map(p => p.split(':'))
     .filter(([a, b]) => DAY.test(a) && DAY.test(b) && a <= b).slice(0, 3);
+  const basis = u.searchParams.get('basis') === 'payments' ? 'payments' : 'invoice';
   const [ty, tm] = parts(today);
   const fyY = tm > 3 ? ty : ty - 1;
   const fyStart = ymd(fyY, 4, 1), lyFyStart = ymd(fyY - 1, 4, 1), lyFyEnd = ymd(fyY, 3, 31);
@@ -133,9 +134,37 @@ export default async (req) => {
       () => xeroApi(t, `/Reports/ProfitAndLoss?fromDate=${lyFyStart}&toDate=${lyFyEnd}&standardLayout=true`),  // 2
       bankTx                                                                                                    // 3
     ];
-    for (const [a, b] of periods) jobs.push(
-      docs('Invoices', 'ACCREC', a, b), docs('CreditNotes', 'ACCRECCREDIT', a, b),
-      docs('Invoices', 'ACCPAY', a, b), docs('CreditNotes', 'ACCPAYCREDIT', a, b));
+    // Payments basis: invoice and bill payments in the period, with the GST share of each invoice
+    const payments = (a, b) => async () => {
+      const list = [];
+      for (let page = 1; page <= 20; page++) {
+        const r = await xeroApi(t, `/Payments?where=${encodeURIComponent(`Date>=${fmtDT(a)} AND Date<=${fmtDT(b)} AND Status=="AUTHORISED"`)}&page=${page}`);
+        const p = r.Payments || []; list.push(...p); if (p.length < 100) break;
+      }
+      const ids = [...new Set(list.map(p => p.Invoice?.InvoiceID).filter(Boolean))];
+      const inv = {};
+      for (let i = 0; i < ids.length; i += 40) {
+        const r = await xeroApi(t, `/Invoices?IDs=${ids.slice(i, i + 40).join(',')}&summaryOnly=true`);
+        for (const x of r.Invoices || []) inv[x.InvoiceID] = x;
+      }
+      const out = { sales: { net: 0, gst: 0, n: 0 }, purchases: { net: 0, gst: 0, n: 0 }, missing: 0 };
+      for (const p of list) {
+        if (!p.Invoice?.InvoiceID) continue;                      // credit note and overpayment refunds
+        const x = inv[p.Invoice?.InvoiceID]; const amt = num(p.Amount);
+        if (!x || !num(x.Total)) { out.missing++; continue; }
+        const side = x.Type === 'ACCREC' ? out.sales : x.Type === 'ACCPAY' ? out.purchases : null; if (!side) continue;
+        if (IRD.test(x.Contact?.Name || '')) continue;
+        const g = amt * num(x.TotalTax) / num(x.Total);
+        side.gst += g; side.net += amt - g; side.n++;
+      }
+      return out;
+    };
+    for (const [a, b] of periods) {
+      if (basis === 'payments') jobs.push(payments(a, b), async () => null, async () => null, async () => null);
+      else jobs.push(
+        docs('Invoices', 'ACCREC', a, b), docs('CreditNotes', 'ACCRECCREDIT', a, b),
+        docs('Invoices', 'ACCPAY', a, b), docs('CreditNotes', 'ACCPAYCREDIT', a, b));
+    }
     const r = await pool(jobs);
     const errors = [];
     const scopeErr = e => /401|403|unauthori[sz]ed|forbidden|scope/i.test(e?.message || '');
@@ -158,11 +187,20 @@ export default async (req) => {
     const gst = periods.map(([a, b], pi) => {
       const base = 4 + pi * 4;
       const v = i => r[base + i].ok ? r[base + i].v : (errors.push(`GST documents ${a} to ${b}: ${r[base + i].e.message}`), null);
-      const inv = v(0)?.Invoices, cr = v(1)?.CreditNotes, bills = v(2)?.Invoices, bcr = v(3)?.CreditNotes;
       const inP = bank.filter(x => { const d = xDate(x.DateString || x.Date); return d >= a && d <= b && !isIrd(x); });
-      const recv = inP.filter(x => x.Type === 'RECEIVE'), spend = inP.filter(x => x.Type === 'SPEND');
+      const recv0 = inP.filter(x => x.Type === 'RECEIVE'), spend0 = inP.filter(x => x.Type === 'SPEND');
+      if (basis === 'payments') {
+        const p = v(0); if (!p) return { start: a, end: b, basis, sales: { net: 0, gst: 0 }, purchases: { net: 0, gst: 0 }, failed: true };
+        return {
+          start: a, end: b, basis, unmatched: p.missing,
+          sales: { net: p.sales.net + sum(recv0, 'SubTotal'), gst: p.sales.gst + sum(recv0, 'TotalTax'), payments: p.sales.n, receiveMoney: recv0.length },
+          purchases: { net: p.purchases.net + sum(spend0, 'SubTotal'), gst: p.purchases.gst + sum(spend0, 'TotalTax'), payments: p.purchases.n, spendMoney: spend0.length }
+        };
+      }
+      const inv = v(0)?.Invoices, cr = v(1)?.CreditNotes, bills = v(2)?.Invoices, bcr = v(3)?.CreditNotes;
+      const recv = recv0, spend = spend0;
       return {
-        start: a, end: b,
+        start: a, end: b, basis,
         sales: { net: sum(inv, 'SubTotal') - sum(cr, 'SubTotal') + sum(recv, 'SubTotal'), gst: sum(inv, 'TotalTax') - sum(cr, 'TotalTax') + sum(recv, 'TotalTax'), invoices: (inv || []).length, creditNotes: (cr || []).length, receiveMoney: recv.length },
         purchases: { net: sum(bills, 'SubTotal') - sum(bcr, 'SubTotal') + sum(spend, 'SubTotal'), gst: sum(bills, 'TotalTax') - sum(bcr, 'TotalTax') + sum(spend, 'TotalTax'), bills: (bills || []).length, creditNotes: (bcr || []).length, spendMoney: spend.length }
       };
