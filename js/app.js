@@ -976,6 +976,25 @@
       ['2027-02', -9426.03, 20676.63, 2000], ['2027-03', -9411.32, 20676.63, 2000]
     ].map(([mk, np, stu, rachel]) => ({ mk, np, stu, rachel }))
   };
+  // What myIR showed on 15 Nov 2026 (read by Claude): filed returns, penalties and interest, and whether paid.
+  // GST is on the payments (cash) basis, two-monthly, periods ending odd months. Income tax return for FY26 due 31 Mar 2027 (agent).
+  const TAX_IRD = {
+    asAt: '2026-11-15',
+    gst: {
+      '2026-05-31': { sales: 49032.86, purchases: 11763.89, toPay: 4991.60, pen: 251.58, int: 18.98, paid: true, paidOn: '2026-07-24' },
+      '2026-07-31': { sales: 51772.46, purchases: 10475.66, toPay: 5806.53, pen: 292.65, int: 25.08, paid: true, paidOn: '2026-09-25', amendment: true },
+      '2026-09-30': { sales: 45740.64, purchases: 10533.23, toPay: 4616.29, pen: 232.66, int: 22.31, paid: false }
+    },
+    paye: {
+      '2026-04': { total: 5297.78, paye: 4209.82, pen: 267.01, int: 11.94, paid: true, paidOn: '2026-05-29' },
+      '2026-05': { total: 5052.15, paye: 4060.37, pen: 282.54, int: 28.34, paid: true, paidOn: '2026-07-24' },
+      '2026-06': { total: 108.79, paye: 65.81, pen: 0, int: 0.10, paid: true, paidOn: '2026-07-24' },
+      '2026-07': { total: 164.95, paye: 98.97, pen: 0, int: 0.04, paid: true, paidOn: '2026-08-21' },
+      '2026-08': { total: 86.63, paye: 51.97, pen: 0, int: 0, paid: true, paidOn: '2026-09-28' },
+      '2026-09': { total: 5052.15, paye: 4060.37, pen: 49.65, int: 1.23, paid: true, paidOn: '2026-10-21' },
+      '2026-10': { total: 5052.15, paye: 4060.37, pen: 0, int: 0, paid: false }
+    }
+  };
   // 2026/27 rates (unchanged from 1 April 2025). ACC earners' levy 1.75% to $156,641.
   const TAXR = { brackets: [[15600, 0.105], [53500, 0.175], [78100, 0.30], [180000, 0.33], [Infinity, 0.39]], acc: 0.0175, accCap: 156641, company: 0.28, provisional: 5000 };
   const SECONDARY = { SB: 0.105, S: 0.175, SH: 0.30, ST: 0.33, SA: 0.39 };
@@ -995,7 +1014,7 @@
   function workingDay(d) { while (C.weekday(d) % 6 === 0 || TAX_HOLIDAYS.has(d)) d = C.addDays(d, 1); return d; }
 
   function taxSettings() {
-    state.settings.tax = Object.assign({ gstMonths: 2, gstCycle: 'odd', gstBasis: 'invoice', agent: true, stuCode: 'M', rachelCode: 'S', rachelOther: 0 }, state.settings.tax || {});
+    state.settings.tax = Object.assign({ gstMonths: 2, gstCycle: 'odd', gstBasis: 'payments', agent: true, stuCode: 'M', rachelCode: 'S', rachelOther: 0 }, state.settings.tax || {});
     return state.settings.tax;
   }
   // GST taxable period containing date d
@@ -1022,14 +1041,14 @@
   function whenChip(d, today, paid) {
     if (paid) return '<span class="chip ok">Paid</span>';
     const n = daysTo(d, today);
-    if (n < 0) return `<span class="chip bad">${-n} day${n === -1 ? '' : 's'} overdue?</span>`;
+    if (n < 0) return `<span class="chip bad">${-n} day${n === -1 ? '' : 's'} overdue</span>`;
     if (n === 0) return '<span class="chip bad">Due today</span>';
     return `<span class="chip ${n <= 7 ? 'bad' : n <= 21 ? 'warn' : ''}">In ${n} day${n === 1 ? '' : 's'}</span>`;
   }
 
   function taxKey() {
     const s = taxSettings(), cur = gstPeriodOf(nzToday(), s), prev = gstPeriodOf(C.addDays(cur.start, -1), s);
-    return { key: `${cur.start}:${cur.end},${prev.start}:${prev.end}`, cur, prev };
+    return { key: `${cur.start}:${cur.end},${prev.start}:${prev.end}&basis=${s.gstBasis === 'invoice' ? 'invoice' : 'payments'}`, cur, prev };
   }
   async function loadTax() {
     const T = state.tax, { key } = taxKey();
@@ -1062,10 +1081,12 @@
       const stu = useX ? a.wages.stu + a.wages.other : p.stu, rachel = useX ? a.wages.rachel : p.rachel;
       const stuPaye = payeMonthly(stu, s.stuCode), rPaye = payeMonthly(rachel, s.rachelCode);
       const ksE = C.round2(stu * TAX_PLAN.ksRate) + C.round2(rachel * TAX_PLAN.ksRate);
-      const total = C.round2(stuPaye + rPaye + ksE * 2);
+      const f = TAX_IRD.paye[p.mk];
+      const calc = C.round2(stuPaye + rPaye + ksE * 2);
+      const total = f ? f.total : calc;
       const due = workingDay(C.addMonths(p.mk, 1) + '-20');
-      const paid = total ? paidOf('paye', C.monthEnd(p.mk), C.addDays(due, 10)) : 0;
-      return { mk: p.mk, done, stu, rachel, stuPaye, rPaye, ks: ksE, total, due, paid, source: useX ? 'xero' : done && a ? 'match' : 'plan', xw };
+      const paid = (f && f.paid) || (total ? paidOf('paye', C.monthEnd(p.mk), C.addDays(due, 10)) > 0 : false);
+      return { mk: p.mk, done, stu, rachel, stuPaye, rPaye, ks: ksE, total, calc, filed: f || null, due, paid, source: f ? 'ird' : useX ? 'xero' : done && a ? 'match' : 'plan', xw };
     });
     const sumP = k => C.round2(paye.reduce((a, r) => a + r[k], 0));
     const stuYear = sumP('stu'), rachelYear = sumP('rachel');
@@ -1098,19 +1119,23 @@
     const gCur = gp.find(g => g.start === cur.start) || null, gPrev = gp.find(g => g.start === prev.start) || null;
     // Work in the current month is invoiced at month end, so add it from the timesheet while the month is open
     let toInvoice = 0;
-    if (state.data && C.monthEnd(curMk) >= today && curMk >= cur.start.slice(0, 7) && curMk <= cur.end.slice(0, 7))
+    if (s.gstBasis === 'invoice' && state.data && C.monthEnd(curMk) >= today && curMk >= cur.start.slice(0, 7) && curMk <= cur.end.slice(0, 7))
       toInvoice = C.round2(state.data.rows.filter(r => C.monthKey(r.date) === curMk && isBillable(r.client)).reduce((a, r) => a + (r.amount || 0) + (r.kmAmt || 0), 0));
     const curGst = gCur ? C.round2(gCur.net + toInvoice * 0.15) : null;
-    const prevPaid = gPrev ? paidOf('gst', C.addDays(prev.end, 1), C.addDays(gstDue(prev.end), 10)) : 0;
-    const gst = { cur, prev, gCur, gPrev, toInvoice, curGst, curDue: gstDue(cur.end), prevDue: gstDue(prev.end), prevPaid, balance: X.bs?.gst ?? null };
+    const prevIrd = +s.gstMonths === 2 && s.gstCycle !== 'even' ? TAX_IRD.gst[prev.end] || null : null;
+    const prevPaid = paidOf('gst', C.addDays(prev.end, 1), today);
+    const prevDone = (prevIrd && prevIrd.paid) || (prevIrd ? prevPaid >= prevIrd.toPay - 1 : prevPaid > 0);
+    const history = +s.gstMonths !== 2 ? [] : Object.entries(TAX_IRD.gst).map(([end, h]) => ({ end, start: C.monthStart(C.addMonths(end.slice(0, 7), -1)), ...h, xero: gp.find(g => g.end === end) || null }));
+    const gst = { cur, prev, gCur, gPrev, toInvoice, curGst, curDue: gstDue(cur.end), prevDue: gstDue(prev.end), prevPaid, prevIrd, prevDone, history, balance: X.bs?.gst ?? null };
 
     // ---- Due dates
     const ev = [];
-    if (gPrev) ev.push({ date: gst.prevDue, kind: 'GST', what: `GST return, ${periodText(prev)}`, amount: gPrev.net, est: true, paid: prevPaid > 0 });
+    if (prevIrd) ev.push({ date: gst.prevDue, kind: 'GST', what: `GST return, ${periodText(prev)}${prevDone ? '' : ` (filed; ${money(prevIrd.toPay)} + ${money(prevIrd.pen + prevIrd.int)} penalty and interest at ${shortDate(TAX_IRD.asAt)})`}`, amount: prevDone ? prevIrd.toPay : C.round2(prevIrd.toPay + prevIrd.pen + prevIrd.int), paid: prevDone });
+    else if (gPrev) ev.push({ date: gst.prevDue, kind: 'GST', what: `GST return, ${periodText(prev)}`, amount: gPrev.net, est: true, paid: prevDone });
     ev.push({ date: gst.curDue, kind: 'GST', what: `GST return, ${periodText(cur)}`, amount: curGst, est: true });
     let np = gstPeriodOf(C.addDays(cur.end, 1), s);
     for (let i = 0; i < 4; i++) { ev.push({ date: gstDue(np.end), kind: 'GST', what: `GST return, ${periodText(np)}`, amount: null }); np = gstPeriodOf(C.addDays(np.end, 1), s); }
-    for (const r of paye) if (r.total) ev.push({ date: r.due, kind: 'PAYE', what: `PAYE and KiwiSaver for ${C.monthLabel(r.mk)} pay`, amount: r.total, est: r.source !== 'xero', paid: r.paid > 0 });
+    for (const r of paye) if (r.total) ev.push({ date: r.due, kind: 'PAYE', what: `PAYE and KiwiSaver for ${C.monthLabel(r.mk)} pay${r.filed ? ' (filed)' : ''}`, amount: r.total, est: !r.filed, paid: r.paid });
     const lyEnd = fyEndY - 1;
     ev.push({ date: inc.returnDate(lyEnd), kind: 'Income tax', what: `Company tax return (IR4) for the year to 31 Mar ${lyEnd}`, amount: null, note: s.agent ? 'Extension of time through your tax agent' : '' });
     ev.push({ date: inc.termDate(lyEnd), kind: 'Income tax', what: `Terminal tax for the year to 31 Mar ${lyEnd}`, amount: lyTax, est: true });
@@ -1167,6 +1192,7 @@
 
     el.innerHTML = head + `
       ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect ? ' · <a href="/api/xero-connect?back=tax">Reconnect Xero</a> to allow reports.' : ''}</div>` : ''}
+      ${gst.prevIrd && !gst.prevDone ? `<div class="callout"><b>GST for ${periodText(gst.prev)} is overdue.</b> myIR showed ${money(gst.prevIrd.toPay + gst.prevIrd.pen + gst.prevIrd.int)} due now at ${shortDate(TAX_IRD.asAt)} (${money(gst.prevIrd.toPay)} GST, ${money(gst.prevIrd.pen)} late payment penalty, ${money(gst.prevIrd.int)} interest, still growing). It was due ${shortDate(gst.prevDue)}.</div>` : ''}
 
       <div class="kpis">
         <div class="kpi lead"><span class="label">Next payment to IRD</span>
@@ -1205,17 +1231,25 @@
           <div class="table-wrap"><table>
             <thead><tr><th></th><th class="num">${periodText(gst.cur)}<div class="note">so far</div></th><th class="num">${periodText(gst.prev)}</th></tr></thead>
             <tbody>
-              <tr><td>Sales and income (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.sales.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.sales.net) : '-'}</td></tr>
+              <tr><td>${s.gstBasis === 'invoice' ? 'Sales and income' : 'Money received'} (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.sales.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.sales.net) : '-'}</td></tr>
               <tr><td>GST on sales</td><td class="num">${gst.gCur ? money(gst.gCur.sales.gst) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.sales.gst) : '-'}</td></tr>
-              <tr><td>Purchases and expenses (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.purchases.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.purchases.net) : '-'}</td></tr>
+              <tr><td>${s.gstBasis === 'invoice' ? 'Purchases and expenses' : 'Paid to suppliers'} (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.purchases.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.purchases.net) : '-'}</td></tr>
               <tr><td>GST on purchases</td><td class="num">${gst.gCur ? money(-gst.gCur.purchases.gst) : '-'}</td><td class="num muted">${gst.gPrev ? money(-gst.gPrev.purchases.gst) : '-'}</td></tr>
               ${gst.toInvoice ? `<tr><td>${C.monthLabel(C.monthKey(today))} work not yet invoiced <div class="note">Timesheet so far, ${money0(gst.toInvoice)} excl GST</div></td><td class="num">${money(gst.toInvoice * 0.15)}</td><td></td></tr>` : ''}
             </tbody>
             <tfoot><tr><td>GST to pay${gst.curGst != null && gst.curGst < 0 ? ' (refund)' : ''}</td><td class="num">${gst.curGst == null ? '-' : money(gst.curGst)}</td><td class="num">${gst.gPrev ? money(gst.gPrev.net) : '-'}</td></tr>
+              ${gst.prevIrd ? `<tr><td class="note" style="font-weight:400">Filed with IRD</td><td></td><td class="num note" style="font-weight:400">${money(gst.prevIrd.toPay)}${gst.gPrev && Math.abs(gst.gPrev.net - gst.prevIrd.toPay) > 5 ? ` <span title="Difference between Xero and the filed return">(Xero ${gst.gPrev.net > gst.prevIrd.toPay ? '+' : ''}${money0(gst.gPrev.net - gst.prevIrd.toPay)})</span>` : ''}</td></tr>` : ''}
               <tr><td class="note" style="font-weight:400">Due</td><td class="num note" style="font-weight:400">${shortDate(gst.curDue)}</td><td class="num note" style="font-weight:400">${shortDate(gst.prevDue)}${gst.prevPaid ? ` · paid ${money0(gst.prevPaid)}` : ''}</td></tr></tfoot>
           </table></div>
           ${gst.balance != null ? `<p class="note">The GST account in Xero shows ${money(Math.abs(gst.balance))} ${gst.balance >= 0 ? 'owing to IRD' : 'owed to you by IRD'} today. That should roughly equal the current period once earlier returns are paid; if it is much higher, an earlier return may still be unpaid or a payment not coded to GST.</p>` : ''}
-          ${s.gstBasis === 'payments' ? '<p class="note">You are set to the payments basis, so the return counts GST when money is received or paid. The figures above are by invoice date and will differ.</p>' : ''}
+          <p class="note">${s.gstBasis === 'invoice' ? 'Invoice basis: GST counts by invoice and bill date.' : 'Payments basis (as registered with IRD): GST counts when customers pay you and when you pay suppliers, from Xero payments and spend/receive money. Work not yet paid for is not included.'}</p>
+          ${gst.history.length ? `<h3 style="margin:14px 0 6px">Filed with IRD <span class="note">(myIR at ${shortDate(TAX_IRD.asAt)})</span></h3>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Period</th><th class="num">Sales incl GST</th><th class="num">GST to pay</th><th class="num">Penalty + interest</th><th>Paid</th></tr></thead>
+            <tbody>${gst.history.map(h => `<tr><td>${periodText(h)}${h.amendment ? ' <span class="chip warn" title="myIR shows an amendment pending for this return">Amendment pending</span>' : ''}</td>
+              <td class="num">${money(h.sales)}</td><td class="num">${money(h.toPay)}</td><td class="num">${h.pen + h.int ? money(h.pen + h.int) : '-'}</td>
+              <td>${h.paid ? `<span class="chip ok">${shortDate(h.paidOn).replace(/ \d{4}$/, '')}</span>` : (h.end === gst.prev.end && gst.prevDone) ? '<span class="chip ok">Paid</span>' : '<span class="chip bad">Not paid</span>'}</td></tr>`).join('')}</tbody>
+          </table></div>` : ''}
         </div>
 
         <div class="panel">
@@ -1255,7 +1289,7 @@
             <td class="num">${r.ks ? money(r.ks * 2) : ''}</td>
             <td class="num"><b>${r.total ? money(r.total) : ''}</b></td>
             <td style="white-space:nowrap">${r.total ? shortDate(r.due) : ''}</td>
-            <td class="note">${!r.total && r.source !== 'xero' ? '' : r.source === 'xero' ? `Xero wages ${money0(r.xw)}` : r.source === 'match' ? 'Xero, as planned' : r.done ? 'Plan (no Xero data)' : 'Plan'}</td>
+            <td class="note">${r.source === 'ird' ? `Filed with IRD${Math.abs(r.calc - r.total) > 1 ? ` <span title="Plan or Xero wages give ${money(r.calc)}">(plan ${money0(r.calc)})</span>` : ''}` : !r.total && r.source !== 'xero' ? '' : r.source === 'xero' ? `Xero wages ${money0(r.xw)}` : r.source === 'match' ? 'Xero, as planned' : r.done ? 'Plan (no Xero data)' : 'Plan'}</td>
             <td>${r.total ? (r.due < today && !r.paid ? '<span class="chip">Due date passed</span>' : whenChip(r.due, today, r.paid)) : ''}</td></tr>`).join('')}</tbody>
           <tfoot><tr><td>Year</td><td class="num">${money0(M.stuYear)}</td><td class="num">${money0(paye.reduce((a, r) => a + r.stuPaye, 0))}</td><td class="num">${money0(M.rachelYear)}</td><td class="num">${money0(paye.reduce((a, r) => a + r.rPaye, 0))}</td><td class="num">${money0(paye.reduce((a, r) => a + r.ks * 2, 0))}</td><td class="num">${money0(paye.reduce((a, r) => a + r.total, 0))}</td><td colspan="3"></td></tr></tfoot>
         </table></div>
@@ -1264,6 +1298,7 @@
           ${s.rachelCode !== 'M' ? `<li>Rachel is on secondary code ${esc(s.rachelCode)}, so her PAYE is ${money(payeMonthly(2000, s.rachelCode))} on $2,000, against ${money(payeMonthly(2000, 'M'))} in the plan workbook (code M). The extra comes back in her year-end refund.</li>` : ''}
           ${X.bs ? `<li>Xero shows ${money(X.bs.paye + X.bs.deductions)} in PAYE Payable and Wages Deductions Payable today: what posted pay runs owe IRD but has not been paid yet.</li>` : ''}
           <li>Payments are due by the 20th of the month after payday. Xero Payroll files the employment information with IRD when each pay run is posted.</li>
+          <li>Late payment penalties and interest charged this year, from myIR: PAYE ${money(Object.values(TAX_IRD.paye).reduce((a, f) => a + f.pen + f.int, 0))}, GST ${money(Object.values(TAX_IRD.gst).reduce((a, f) => a + f.pen + f.int, 0))}. Late payment penalties are not tax deductible; IRD interest is.</li>
         </ul>
       </div>
 
