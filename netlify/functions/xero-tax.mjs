@@ -84,6 +84,27 @@ function parseBs(body) {
   };
 }
 
+// Monthly P&L columns: one report per calendar month (Xero's periods=N&timeframe=MONTH steps back by
+// day-of-month from the end date, so from a 30-day month it drops the 31st of longer months).
+// Merges single-month reports (newest first) into one Xero-shaped report with a column per month.
+function mergeMonths(bodies) {
+  const head = [{}], secs = new Map();
+  bodies.forEach((b, c) => {
+    const rep = b?.Reports?.[0]; if (!rep) throw new Error('Xero returned no profit and loss report');
+    head.push((rep.Rows.find(r => r.RowType === 'Header')?.Cells || [])[1] || { Value: '' });
+    for (const sec of rep.Rows.filter(r => r.RowType === 'Section')) {
+      const S = secs.get(sec.Title) || new Map(); secs.set(sec.Title, S);
+      for (const row of sec.Rows || []) {
+        if (row.RowType !== 'Row') continue;
+        const first = row.Cells?.[0] || {}, k = first.Attributes?.find(a => a.Id === 'account')?.Value || first.Value;
+        const o = S.get(k) || { first, vals: new Array(bodies.length).fill(0) };
+        o.vals[c] = row.Cells?.[1]?.Value ?? 0; S.set(k, o);
+      }
+    }
+  });
+  return { Reports: [{ Rows: [{ RowType: 'Header', Cells: head }, ...[...secs].map(([Title, S]) => ({ RowType: 'Section', Title, Rows: [...S.values()].map(o => ({ RowType: 'Row', Cells: [o.first, ...o.vals.map(v => ({ Value: String(v) }))] })) }))] }] };
+}
+
 async function pool(jobs, n = 4) {
   const out = new Array(jobs.length); let i = 0;
   await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, async () => {
@@ -130,7 +151,7 @@ export default async (req) => {
     };
     const jobs = [
       () => xeroApi(t, `/Reports/BalanceSheet?date=${today}&standardLayout=true`),                              // 0
-      () => xeroApi(t, `/Reports/ProfitAndLoss?fromDate=${ymd(ty, tm, 1)}&toDate=${ymd(ty, tm, dim(ty, tm))}${nMonths > 1 ? `&periods=${nMonths - 1}&timeframe=MONTH` : ''}&standardLayout=true`), // 1
+      async () => null,                                                                                         // 1 (months below)
       () => xeroApi(t, `/Reports/ProfitAndLoss?fromDate=${lyFyStart}&toDate=${lyFyEnd}&standardLayout=true`),  // 2
       bankTx                                                                                                    // 3
     ];
@@ -165,7 +186,15 @@ export default async (req) => {
         docs('Invoices', 'ACCREC', a, b), docs('CreditNotes', 'ACCRECCREDIT', a, b),
         docs('Invoices', 'ACCPAY', a, b), docs('CreditNotes', 'ACCPAYCREDIT', a, b));
     }
+    // One P&L per month, newest first, appended after everything else
+    const monthBase = jobs.length;
+    for (let c = 0; c < nMonths; c++) {
+      const k = nMonths - 1 - c, y = fyY + (3 + k >= 12 ? 1 : 0), m = ((3 + k) % 12) + 1;
+      jobs.push(() => xeroApi(t, `/Reports/ProfitAndLoss?fromDate=${ymd(y, m, 1)}&toDate=${ymd(y, m, dim(y, m))}&standardLayout=true`));
+    }
     const r = await pool(jobs);
+    { const ms = r.slice(monthBase); const bad = ms.find(x => !x.ok);
+      r[1] = bad ? bad : (() => { try { return { ok: true, v: mergeMonths(ms.map(x => x.v)) }; } catch (e) { return { ok: false, e }; } })(); }
     const errors = [];
     const scopeErr = e => /401|403|unauthori[sz]ed|forbidden|scope/i.test(e?.message || '');
     const needsReconnect = [0, 1, 2].some(i => !r[i].ok && scopeErr(r[i].e));
