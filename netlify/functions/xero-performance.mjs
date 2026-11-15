@@ -95,6 +95,27 @@ function parseBs(body) {
 const fmtDT = s => { const [y, m, d] = parts(s); return `DateTime(${y},${m},${d})`; };
 
 // Runs async jobs with at most `n` in flight (Xero allows 5 concurrent calls per organisation)
+// Monthly P&L columns: one report per calendar month (Xero's periods=N&timeframe=MONTH steps back by
+// day-of-month from the end date, so from a 30-day month it drops the 31st of longer months).
+// Merges single-month reports (newest first) into one Xero-shaped report with a column per month.
+function mergeMonths(bodies) {
+  const head = [{}], secs = new Map();
+  bodies.forEach((b, c) => {
+    const rep = b?.Reports?.[0]; if (!rep) throw new Error('Xero returned no profit and loss report');
+    head.push((rep.Rows.find(r => r.RowType === 'Header')?.Cells || [])[1] || { Value: '' });
+    for (const sec of rep.Rows.filter(r => r.RowType === 'Section')) {
+      const S = secs.get(sec.Title) || new Map(); secs.set(sec.Title, S);
+      for (const row of sec.Rows || []) {
+        if (row.RowType !== 'Row') continue;
+        const first = row.Cells?.[0] || {}, k = first.Attributes?.find(a => a.Id === 'account')?.Value || first.Value;
+        const o = S.get(k) || { first, vals: new Array(bodies.length).fill(0) };
+        o.vals[c] = row.Cells?.[1]?.Value ?? 0; S.set(k, o);
+      }
+    }
+  });
+  return { Reports: [{ Rows: [{ RowType: 'Header', Cells: head }, ...[...secs].map(([Title, S]) => ({ RowType: 'Section', Title, Rows: [...S.values()].map(o => ({ RowType: 'Row', Cells: [o.first, ...o.vals.map(v => ({ Value: String(v) }))] })) }))] }] };
+}
+
 async function pool(jobs, n = 4) {
   const out = new Array(jobs.length); let i = 0;
   await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, async () => {
@@ -119,20 +140,28 @@ export default async (req) => {
   try {
     const t = await session();
     const pnl = (from, to, extra = '') => () => xeroApi(t, `/Reports/ProfitAndLoss?fromDate=${from}&toDate=${to}&standardLayout=true${extra}`);
-    const monthly = (y, m, count) => pnl(ymd(y, m, 1), ymd(y, m, dim(y, m)), count > 1 ? `&periods=${count - 1}&timeframe=MONTH` : '');
     const docs = (path, type, from, to) => () => xeroApi(t, `/${path}?where=${encodeURIComponent(`Type=="${type}" AND Date>=${fmtDT(from)} AND Date<=${fmtDT(to)}`)}&Statuses=AUTHORISED,PAID&summaryOnly=true`);
     const jobs = [
       pnl(fyStart, asAt),                                          // 0 this year to date
       pnl(lyFyStart, lyAsAt),                                      // 1 last year to same point
-      monthly(ay, am, nMonths),                                    // 2 this FY by month
-      monthly(fyY, fyEndMonth, 12),                                // 3 last FY by month (Apr..Mar)
+      async () => null,                                            // 2 this FY by month (merged below)
+      async () => null,                                            // 3 last FY by month (merged below)
       () => xeroApi(t, `/Reports/BalanceSheet?date=${asAt}&periods=1&timeframe=YEAR&standardLayout=true`), // 4
       docs('Invoices', 'ACCREC', fyStart, asAt),                   // 5
       docs('Invoices', 'ACCREC', lyFyStart, lyAsAt),               // 6
       docs('CreditNotes', 'ACCRECCREDIT', fyStart, asAt),          // 7
       docs('CreditNotes', 'ACCRECCREDIT', lyFyStart, lyAsAt)       // 8
     ];
+    // Months as separate reports, newest first: this FY (nMonths) then last FY (12)
+    const monthJob = (y, m) => pnl(ymd(y, m, 1), ymd(y, m, dim(y, m)));
+    const ym = (y, m, back) => { const d = new Date(Date.UTC(y, m - 1 - back, 1)); return [d.getUTCFullYear(), d.getUTCMonth() + 1]; };
+    const tyBase = jobs.length;
+    for (let c = 0; c < nMonths; c++) jobs.push(monthJob(...ym(ay, am, c)));
+    const lyBase = jobs.length;
+    for (let c = 0; c < 12; c++) jobs.push(monthJob(...ym(fyY, fyEndMonth, c)));
     const r = await pool(jobs);
+    const merged = (a, b) => { const ms = r.slice(a, b); const bad = ms.find(x => !x.ok); if (bad) return bad; try { return { ok: true, v: mergeMonths(ms.map(x => x.v)) }; } catch (e) { return { ok: false, e }; } };
+    r[2] = merged(tyBase, lyBase); r[3] = merged(lyBase, lyBase + 12);
     const errors = [];
     const scopeErr = e => /401|403|unauthori[sz]ed|forbidden|scope/i.test(e?.message || '');
     const needsReconnect = [0, 1, 2, 3, 4].some(i => !r[i].ok && scopeErr(r[i].e));
