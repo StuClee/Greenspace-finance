@@ -184,7 +184,8 @@
     config: null, settings: null, data: null, view: 'dashboard', dayBase: {},
     tsDate: null, tsMonth: null, dashMonth: null, editing: null,
     inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, pcharts: {}, saving: 0,
-    perf: { mode: 'months', cache: {}, data: null, loading: false, error: null, allLines: false }
+    perf: { mode: 'months', cache: {}, data: null, loading: false, error: null, allLines: false },
+    tax: { data: null, key: null, loading: false, error: null }
   };
 
   function applyConfig(cfg) {
@@ -283,7 +284,7 @@
   $('#fileInput').addEventListener('change', e => { importWorkbook(e.target.files[0], $('#impFrom')?.value); e.target.value = ''; });
 
   // ---------- routing ----------
-  const VIEWS = ['dashboard', 'performance', 'timesheet', 'invoicing', 'landscaping', 'setup'];
+  const VIEWS = ['dashboard', 'performance', 'tax', 'timesheet', 'invoicing', 'landscaping', 'setup'];
   function route() {
     let h = (location.hash || '').replace('#', '');
     if (h === 'materials') h = 'landscaping';
@@ -294,7 +295,7 @@
     if (!state.data) { $('#view-loading').hidden = false; return; }
     if (state.firstRun && state.view !== 'setup') { renderWelcome($('#view-empty')); $('#view-empty').hidden = false; return; }
     const el = $('#view-' + state.view); el.hidden = false;
-    ({ dashboard: renderDashboard, performance: renderPerformance, timesheet: renderTimesheet, invoicing: renderInvoicing, landscaping: renderMaterials, setup: renderSetup })[state.view](el);
+    ({ dashboard: renderDashboard, performance: renderPerformance, tax: renderTax, timesheet: renderTimesheet, invoicing: renderInvoicing, landscaping: renderMaterials, setup: renderSetup })[state.view](el);
   }
   window.addEventListener('hashchange', route);
   const go = v => { if (location.hash === '#' + v) route(); else location.hash = v; };
@@ -762,11 +763,11 @@
     $$('[data-pnl-all]', el).forEach(b => b.onclick = () => { P.allLines = !P.allLines; renderPerformance(el); });
     drawPerfCharts(M, X);
   }
-  function reconnectHTML(msg) {
+  function reconnectHTML(msg, back = 'performance') {
     return `<div class="panel"><h2>Allow Xero reports</h2>
       <p>This page reads the profit and loss and balance sheet reports, which need one more permission in Xero. Reconnect once and tick the box to allow access when Xero asks. Draft invoicing keeps working as before.</p>
-      <p style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><a class="btn" href="/api/xero-connect?back=performance">Reconnect Xero</a>
-        <a class="btn btn-quiet" href="/api/xero-connect?back=performance&reports=legacy">Reconnect with the older report permission</a></p>
+      <p style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><a class="btn" href="/api/xero-connect?back=${back}">Reconnect Xero</a>
+        <a class="btn btn-quiet" href="/api/xero-connect?back=${back}&reports=legacy">Reconnect with the older report permission</a></p>
       <p class="note">Use the first button. If the page still shows this afterwards, use the second one: Xero apps created before March 2026 may only accept the older permission name.</p>
       <p class="note">Xero said: ${esc(msg)}</p></div>`;
   }
@@ -957,6 +958,357 @@
     }
   }
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (state.view === 'performance' && state.perf.data) route(); });
+
+
+  // ======================================================================
+  // TAX (GST, PAYE and company income tax, with IRD due dates)
+  // ======================================================================
+  // FY27 profit and wages plan, agreed 15 Nov 2026 (plan workbook). Apr to Oct were Xero actuals at the time,
+  // Nov to Mar are the plan. np = net profit before tax for the month; stu / rachel = gross wages.
+  const TAX_PLAN = {
+    label: 'FY27 profit and wages plan, agreed 15 Nov 2026',
+    ksRate: 0.035,                       // KiwiSaver, employee and employer
+    stuRefund: 3548.31, rachelRefund: 245, // what the workbook expects back after 31 March (Rachel on tax code M)
+    months: [
+      ['2026-04', 6888.60, 14168.27, 0], ['2026-05', -9002.95, 14168.27, 0], ['2026-06', 17216.67, 0, 0], ['2026-07', 20294.73, 0, 0],
+      ['2026-08', 17914.92, 0, 0], ['2026-09', -2454.53, 14168.27, 0], ['2026-10', 9043.97, 14168.27, 0],
+      ['2026-11', -6411.32, 20676.63, 2000], ['2026-12', -13445.64, 20676.63, 2000], ['2027-01', -12440.74, 20676.63, 2000],
+      ['2027-02', -9426.03, 20676.63, 2000], ['2027-03', -9411.32, 20676.63, 2000]
+    ].map(([mk, np, stu, rachel]) => ({ mk, np, stu, rachel }))
+  };
+  // 2026/27 rates (unchanged from 1 April 2025). ACC earners' levy 1.75% to $156,641.
+  const TAXR = { brackets: [[15600, 0.105], [53500, 0.175], [78100, 0.30], [180000, 0.33], [Infinity, 0.39]], acc: 0.0175, accCap: 156641, company: 0.28, provisional: 5000 };
+  const SECONDARY = { SB: 0.105, S: 0.175, SH: 0.30, ST: 0.33, SA: 0.39 };
+  function personalTax(inc) { let t = 0, lo = 0; for (const [hi, r] of TAXR.brackets) { if (inc > lo) t += (Math.min(inc, hi) - lo) * r; lo = hi; } return t; }
+  const accLevy = inc => Math.min(Math.max(inc, 0), TAXR.accCap) * TAXR.acc;
+  const taxAndAcc = inc => personalTax(inc) + accLevy(inc);
+  // Monthly PAYE: main code M treats the month's pay as if paid all year; secondary codes are a flat rate plus ACC
+  function payeMonthly(gross, code) {
+    if (!gross) return 0;
+    if (SECONDARY[code]) return C.round2(gross * (SECONDARY[code] + TAXR.acc));
+    return C.round2(taxAndAcc(gross * 12) / 12);
+  }
+
+  // IRD moves a due date on a weekend or national public holiday to the next working day
+  const TAX_HOLIDAYS = new Set([...Object.keys(C.NZ_HOLIDAYS).filter(d => !/anniversary/i.test(C.NZ_HOLIDAYS[d])),
+    '2028-01-03', '2028-01-04', '2028-02-07', '2028-04-14', '2028-04-17', '2028-04-25', '2028-06-05']);
+  function workingDay(d) { while (C.weekday(d) % 6 === 0 || TAX_HOLIDAYS.has(d)) d = C.addDays(d, 1); return d; }
+
+  function taxSettings() {
+    state.settings.tax = Object.assign({ gstMonths: 2, gstCycle: 'odd', gstBasis: 'invoice', agent: true, stuCode: 'M', rachelCode: 'S', rachelOther: 0 }, state.settings.tax || {});
+    return state.settings.tax;
+  }
+  // GST taxable period containing date d
+  function gstPeriodOf(d, s) {
+    const n = +s.gstMonths || 2;
+    const ends = n === 1 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] : n === 6 ? [3, 9] : s.gstCycle === 'even' ? [2, 4, 6, 8, 10, 12] : [1, 3, 5, 7, 9, 11];
+    const [y, m] = d.split('-').map(Number);
+    let em = ends.find(e => e >= m), ey = y;
+    if (!em) { em = ends[0]; ey = y + 1; }
+    const endMk = `${ey}-${C.pad(em)}`;
+    return { start: C.monthStart(C.addMonths(endMk, -(n - 1))), end: C.monthEnd(endMk) };
+  }
+  // 28th of the month after the period, except periods ending 30 November (15 January) and 31 March (7 May)
+  function gstDue(end) {
+    const [y, m] = end.split('-').map(Number);
+    return workingDay(m === 11 ? `${y + 1}-01-15` : m === 3 ? `${y}-05-07` : C.addMonths(end.slice(0, 7), 1) + '-28');
+  }
+  const periodText = p => {
+    const a = C.parseISO(p.start), b = C.parseISO(p.end);
+    const ma = C.MONTHS[a.getUTCMonth()], mb = C.MONTHS[b.getUTCMonth()];
+    return p.start.slice(0, 7) === p.end.slice(0, 7) ? `${mb} ${b.getUTCFullYear()}` : `${ma}${a.getUTCFullYear() !== b.getUTCFullYear() ? ' ' + a.getUTCFullYear() : ''} to ${mb} ${b.getUTCFullYear()}`;
+  };
+  const daysTo = (d, today) => Math.round((C.parseISO(d) - C.parseISO(today)) / 864e5);
+  function whenChip(d, today, paid) {
+    if (paid) return '<span class="chip ok">Paid</span>';
+    const n = daysTo(d, today);
+    if (n < 0) return `<span class="chip bad">${-n} day${n === -1 ? '' : 's'} overdue?</span>`;
+    if (n === 0) return '<span class="chip bad">Due today</span>';
+    return `<span class="chip ${n <= 7 ? 'bad' : n <= 21 ? 'warn' : ''}">In ${n} day${n === 1 ? '' : 's'}</span>`;
+  }
+
+  function taxKey() {
+    const s = taxSettings(), cur = gstPeriodOf(nzToday(), s), prev = gstPeriodOf(C.addDays(cur.start, -1), s);
+    return { key: `${cur.start}:${cur.end},${prev.start}:${prev.end}`, cur, prev };
+  }
+  async function loadTax() {
+    const T = state.tax, { key } = taxKey();
+    T.loading = true; T.error = null;
+    try {
+      const r = await fetch('/api/xero-tax?periods=' + key, { headers: { accept: 'application/json' } });
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw Object.assign(new Error('The Tax page reads from Xero, which works once the app runs on Netlify.'), { local: true });
+      const j = await r.json();
+      if (!r.ok) throw Object.assign(new Error(j.error || 'Xero request failed (' + r.status + ')'), { needsReconnect: j.needsReconnect });
+      T.data = j; T.key = key;
+    } catch (e) { T.error = e; T.data = null; }
+    T.loading = false;
+    if (state.view === 'tax') route();
+  }
+
+  // Everything the Tax page shows, worked out from Xero, the plan and the settings
+  function taxModel(X) {
+    const s = taxSettings(), today = X.today, curMk = C.monthKey(today);
+    const xm = new Map((X.months || []).map(m => [m.mk, m]));
+    const pays = X.irdPayments || [];
+    const paidOf = (kind, from, to) => pays.filter(p => p.date >= from && p.date <= to && (p.kinds[kind] || (kind === 'gst' && !Object.keys(p.kinds).length && /gst/i.test(p.reference))))
+      .reduce((a, p) => a + (p.kinds[kind] != null ? p.kinds[kind] : p.total), 0);
+
+    // ---- PAYE: plan months, with Xero wages replacing the plan for completed months that differ from it
+    const paye = TAX_PLAN.months.map(p => {
+      const a = xm.get(p.mk), done = p.mk < curMk;
+      const xw = a ? a.wages.stu + a.wages.rachel + a.wages.other : null;
+      const useX = done && a && Math.abs(xw - (p.stu + p.rachel)) > 1;
+      const stu = useX ? a.wages.stu + a.wages.other : p.stu, rachel = useX ? a.wages.rachel : p.rachel;
+      const stuPaye = payeMonthly(stu, s.stuCode), rPaye = payeMonthly(rachel, s.rachelCode);
+      const ksE = C.round2(stu * TAX_PLAN.ksRate) + C.round2(rachel * TAX_PLAN.ksRate);
+      const total = C.round2(stuPaye + rPaye + ksE * 2);
+      const due = workingDay(C.addMonths(p.mk, 1) + '-20');
+      const paid = total ? paidOf('paye', C.monthEnd(p.mk), C.addDays(due, 10)) : 0;
+      return { mk: p.mk, done, stu, rachel, stuPaye, rPaye, ks: ksE, total, due, paid, source: useX ? 'xero' : done && a ? 'match' : 'plan', xw };
+    });
+    const sumP = k => C.round2(paye.reduce((a, r) => a + r[k], 0));
+    const stuYear = sumP('stu'), rachelYear = sumP('rachel');
+    const stuRefund = C.round2(sumP('stuPaye') - taxAndAcc(stuYear));
+    const other = +s.rachelOther || 0;
+    const rachelRefund = C.round2(sumP('rPaye') - (taxAndAcc(other + rachelYear) - taxAndAcc(other)));
+
+    // ---- Company income tax: completed months from Xero + the plan for the rest of the year
+    const doneM = (X.months || []).filter(m => m.mk < curMk);
+    const taxable = m => m.np + m.incomeTaxExp + m.nonDeductible;
+    const actual = C.round2(doneM.reduce((a, m) => a + taxable(m), 0));
+    const lastDone = doneM.length ? doneM[doneM.length - 1].mk : null;
+    const planRest = C.round2(TAX_PLAN.months.filter(p => !lastDone || p.mk > lastDone).reduce((a, p) => a + p.np, 0));
+    const planToDate = C.round2(TAX_PLAN.months.filter(p => lastDone && p.mk <= lastDone).reduce((a, p) => a + p.np, 0));
+    const planYear = C.round2(TAX_PLAN.months.reduce((a, p) => a + p.np, 0));
+    const projected = C.round2(actual + planRest);
+    const coTax = C.round2(Math.max(0, projected) * TAXR.company);
+    const threshold = TAXR.provisional / TAXR.company;
+    const lyTaxable = X.ly ? X.ly.np + X.ly.incomeTaxExp + X.ly.nonDeductible : null;
+    const lyTax = lyTaxable == null ? null : C.round2(Math.max(0, lyTaxable) * TAXR.company);
+    const fyEndY = +X.fyStart.slice(0, 4) + 1;              // this FY ends 31 March fyEndY
+    const termDate = y => workingDay(s.agent ? `${y + 1}-04-07` : `${y + 1}-02-07`);
+    const returnDate = y => workingDay(s.agent ? `${y + 1}-03-31` : `${y}-07-07`);
+    const provisionalNow = lyTax != null && lyTax > TAXR.provisional;
+    const inc = { actual, lastDone, planRest, planToDate, planYear, projected, coTax, threshold, headroom: C.round2(threshold - projected), lyTaxable, lyTax, provisionalNow, provisionalNext: coTax > TAXR.provisional, fyEndY, termDate, returnDate, balance: X.bs?.incomeTax ?? null, rwt: X.bs?.rwt ?? null };
+
+    // ---- GST: current and previous period from Xero documents (invoice basis)
+    const { cur, prev } = taxKey();
+    const gp = (X.gst || []).map(g => ({ ...g, net: C.round2(g.sales.gst - g.purchases.gst) }));
+    const gCur = gp.find(g => g.start === cur.start) || null, gPrev = gp.find(g => g.start === prev.start) || null;
+    // Work in the current month is invoiced at month end, so add it from the timesheet while the month is open
+    let toInvoice = 0;
+    if (state.data && C.monthEnd(curMk) >= today && curMk >= cur.start.slice(0, 7) && curMk <= cur.end.slice(0, 7))
+      toInvoice = C.round2(state.data.rows.filter(r => C.monthKey(r.date) === curMk && isBillable(r.client)).reduce((a, r) => a + (r.amount || 0) + (r.kmAmt || 0), 0));
+    const curGst = gCur ? C.round2(gCur.net + toInvoice * 0.15) : null;
+    const prevPaid = gPrev ? paidOf('gst', C.addDays(prev.end, 1), C.addDays(gstDue(prev.end), 10)) : 0;
+    const gst = { cur, prev, gCur, gPrev, toInvoice, curGst, curDue: gstDue(cur.end), prevDue: gstDue(prev.end), prevPaid, balance: X.bs?.gst ?? null };
+
+    // ---- Due dates
+    const ev = [];
+    if (gPrev) ev.push({ date: gst.prevDue, kind: 'GST', what: `GST return, ${periodText(prev)}`, amount: gPrev.net, est: true, paid: prevPaid > 0 });
+    ev.push({ date: gst.curDue, kind: 'GST', what: `GST return, ${periodText(cur)}`, amount: curGst, est: true });
+    let np = gstPeriodOf(C.addDays(cur.end, 1), s);
+    for (let i = 0; i < 4; i++) { ev.push({ date: gstDue(np.end), kind: 'GST', what: `GST return, ${periodText(np)}`, amount: null }); np = gstPeriodOf(C.addDays(np.end, 1), s); }
+    for (const r of paye) if (r.total) ev.push({ date: r.due, kind: 'PAYE', what: `PAYE and KiwiSaver for ${C.monthLabel(r.mk)} pay`, amount: r.total, est: r.source !== 'xero', paid: r.paid > 0 });
+    const lyEnd = fyEndY - 1;
+    ev.push({ date: inc.returnDate(lyEnd), kind: 'Income tax', what: `Company tax return (IR4) for the year to 31 Mar ${lyEnd}`, amount: null, note: s.agent ? 'Extension of time through your tax agent' : '' });
+    ev.push({ date: inc.termDate(lyEnd), kind: 'Income tax', what: `Terminal tax for the year to 31 Mar ${lyEnd}`, amount: lyTax, est: true });
+    ev.push({ date: inc.returnDate(fyEndY), kind: 'Income tax', what: `Company tax return (IR4) for the year to 31 Mar ${fyEndY}`, amount: null });
+    ev.push({ date: inc.termDate(fyEndY), kind: 'Income tax', what: `Terminal tax for the year to 31 Mar ${fyEndY}`, amount: provisionalNow ? null : coTax, est: true });
+    if (provisionalNow) {
+      const inst = C.round2(lyTax * 1.05 / (+s.gstMonths === 6 ? 2 : 3));
+      const dates = +s.gstMonths === 6 ? [`${fyEndY - 1}-10-28`, `${fyEndY}-05-07`] : [`${fyEndY - 1}-08-28`, `${fyEndY}-01-15`, `${fyEndY}-05-07`];
+      dates.forEach((d, i) => ev.push({ date: workingDay(d), kind: 'Income tax', what: `Provisional tax instalment ${i + 1} of ${dates.length}`, amount: inst, est: true }));
+    }
+    if (inc.provisionalNext) {
+      const inst = C.round2(coTax * 1.05 / 3);
+      [`${fyEndY}-08-28`, `${fyEndY + 1}-01-15`].forEach((d, i) => ev.push({ date: workingDay(d), kind: 'Income tax', what: `Provisional tax instalment ${i + 1} for the year to 31 Mar ${fyEndY + 1}`, amount: inst, est: true }));
+    }
+    ev.sort((a, b) => a.date.localeCompare(b.date));
+    const upcoming = ev.filter(e => e.date >= today || (!e.paid && daysTo(e.date, today) >= -30 && e.amount > 0));
+    return { s, today, paye, stuYear, rachelYear, stuRefund, rachelRefund, inc, gst, upcoming, pays };
+  }
+
+  function renderTax(el) {
+    const T = state.tax, { key } = taxKey();
+    if (T.key !== key) { T.data = null; }
+    if (!T.data && !T.loading && !T.error) loadTax();
+    const X = T.data;
+    const head = `
+      <div class="view-head">
+        <div><div class="label">Tax</div><h1>GST, PAYE and income tax</h1>
+          <div class="note">Live from Xero, with the ${esc(TAX_PLAN.label)} for the months still to come</div></div>
+        <div class="controls">
+          <button class="btn btn-quiet btn-small" id="tRefresh" ${T.loading ? 'disabled' : ''}>${T.loading ? 'Loading ...' : 'Refresh'}</button>
+        </div>
+      </div>`;
+    if (!X) {
+      let body = '<div class="panel"><p class="muted">Getting the figures from Xero ...</p></div>';
+      if (T.error && !T.loading) {
+        const e = T.error;
+        body = e.local ? `<div class="callout">${esc(e.message)}</div>`
+          : e.needsReconnect ? reconnectHTML(e.message, 'tax')
+          : `<div class="callout">Could not get the figures from Xero: ${esc(e.message)} <button class="btn btn-small btn-quiet" id="tRetry">Try again</button></div>`;
+      }
+      el.innerHTML = head + body + taxSettingsHTML();
+      wireTax(el);
+      if ($('#tRetry')) $('#tRetry').onclick = () => { loadTax(); route(); };
+      return;
+    }
+    const M = taxModel(X), { gst, inc, paye, s, today } = M;
+    const next = M.upcoming.find(e => e.date >= today && e.amount > 0 && !e.paid);
+    const nextPaye = paye.find(r => r.total && r.due >= today && !r.paid);
+    const restPaye = C.round2(paye.filter(r => r.due >= today && !r.paid).reduce((a, r) => a + r.total, 0));
+    const amt = (v, est) => v == null ? '<span class="muted">-</span>' : `${est ? '<span class="muted" title="Estimate">~</span>' : ''}${money(v)}`;
+    const updated = new Date(X.fetchedAt).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' });
+    const pct = Math.max(0, Math.min(1, inc.projected / inc.threshold));
+    const kindChip = k => `<span class="chip">${k}</span>`;
+
+    el.innerHTML = head + `
+      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect ? ' · <a href="/api/xero-connect?back=tax">Reconnect Xero</a> to allow reports.' : ''}</div>` : ''}
+
+      <div class="kpis">
+        <div class="kpi lead"><span class="label">Next payment to IRD</span>
+          <span class="value">${next ? money0(next.amount) : '-'}</span>
+          <span class="sub">${next ? `${esc(next.what)}, due ${shortDate(next.date)}` : 'Nothing due'}</span>
+          ${next ? `<span class="sub">${whenChip(next.date, today)}</span>` : ''}</div>
+        <div class="kpi"><span class="label">GST, ${periodText(gst.cur)}</span>
+          <span class="value">${gst.curGst == null ? '-' : money0(gst.curGst)}</span>
+          <span class="sub">${gst.curGst != null && gst.curGst < 0 ? 'Refund expected · ' : ''}Return due ${shortDate(gst.curDue)}</span>
+          <span class="sub">So far from Xero${gst.toInvoice ? ` + ${C.monthLabel(C.monthKey(today))} work still to invoice` : ''}</span></div>
+        <div class="kpi"><span class="label">PAYE and KiwiSaver still to pay</span>
+          <span class="value">${money0(restPaye)}</span>
+          <span class="sub">${nextPaye ? `Next ${money0(nextPaye.total)} on ${shortDate(nextPaye.due)} (${C.monthLabel(nextPaye.mk)} pay)` : 'Nothing left this year'}</span>
+          <span class="sub">To 20 Apr ${inc.fyEndY}</span></div>
+        <div class="kpi"><span class="label">Company tax, year to 31 Mar ${inc.fyEndY}</span>
+          <span class="value">${money0(inc.coTax)}</span>
+          <span class="sub">On projected profit of ${money0(inc.projected)} (plan ${money0(inc.planYear)})</span>
+          <span class="sub">${inc.provisionalNext ? '<span class="delta bad">Over $5,000: provisional tax next year</span>' : '<span class="delta good">Under $5,000: no provisional tax next year</span>'}</span></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Coming up</h2><span class="note">IRD due dates, moved to the next working day where they fall on a weekend or public holiday · ~ = estimate</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Due</th><th>Tax</th><th>What</th><th class="num">Amount</th><th></th></tr></thead>
+          <tbody>${M.upcoming.slice(0, 12).map(e => `<tr>
+            <td style="white-space:nowrap">${shortDate(e.date)}</td><td>${kindChip(e.kind)}</td>
+            <td>${esc(e.what)}${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}</td>
+            <td class="num">${e.amount === 0 ? '<span class="muted">Nil</span>' : amt(e.amount, e.est)}</td>
+            <td>${whenChip(e.date, today, e.paid)}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>GST</h2><span class="note">${+s.gstMonths === 1 ? 'Monthly' : +s.gstMonths === 6 ? 'Six-monthly' : 'Two-monthly'} returns · ${s.gstBasis === 'payments' ? 'payments basis' : 'invoice basis'}</span></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th></th><th class="num">${periodText(gst.cur)}<div class="note">so far</div></th><th class="num">${periodText(gst.prev)}</th></tr></thead>
+            <tbody>
+              <tr><td>Sales and income (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.sales.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.sales.net) : '-'}</td></tr>
+              <tr><td>GST on sales</td><td class="num">${gst.gCur ? money(gst.gCur.sales.gst) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.sales.gst) : '-'}</td></tr>
+              <tr><td>Purchases and expenses (excl GST)</td><td class="num">${gst.gCur ? money(gst.gCur.purchases.net) : '-'}</td><td class="num muted">${gst.gPrev ? money(gst.gPrev.purchases.net) : '-'}</td></tr>
+              <tr><td>GST on purchases</td><td class="num">${gst.gCur ? money(-gst.gCur.purchases.gst) : '-'}</td><td class="num muted">${gst.gPrev ? money(-gst.gPrev.purchases.gst) : '-'}</td></tr>
+              ${gst.toInvoice ? `<tr><td>${C.monthLabel(C.monthKey(today))} work not yet invoiced <div class="note">Timesheet so far, ${money0(gst.toInvoice)} excl GST</div></td><td class="num">${money(gst.toInvoice * 0.15)}</td><td></td></tr>` : ''}
+            </tbody>
+            <tfoot><tr><td>GST to pay${gst.curGst != null && gst.curGst < 0 ? ' (refund)' : ''}</td><td class="num">${gst.curGst == null ? '-' : money(gst.curGst)}</td><td class="num">${gst.gPrev ? money(gst.gPrev.net) : '-'}</td></tr>
+              <tr><td class="note" style="font-weight:400">Due</td><td class="num note" style="font-weight:400">${shortDate(gst.curDue)}</td><td class="num note" style="font-weight:400">${shortDate(gst.prevDue)}${gst.prevPaid ? ` · paid ${money0(gst.prevPaid)}` : ''}</td></tr></tfoot>
+          </table></div>
+          ${gst.balance != null ? `<p class="note">The GST account in Xero shows ${money(Math.abs(gst.balance))} ${gst.balance >= 0 ? 'owing to IRD' : 'owed to you by IRD'} today. That should roughly equal the current period once earlier returns are paid; if it is much higher, an earlier return may still be unpaid or a payment not coded to GST.</p>` : ''}
+          ${s.gstBasis === 'payments' ? '<p class="note">You are set to the payments basis, so the return counts GST when money is received or paid. The figures above are by invoice date and will differ.</p>' : ''}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Company income tax</h2><span class="note">Year to 31 Mar ${inc.fyEndY} · 28%</span></div>
+          <div class="table-wrap"><table>
+            <tbody>
+              <tr><td>Profit before tax, Apr to ${inc.lastDone ? C.MONTHS[C.parseISO(inc.lastDone + '-01').getUTCMonth()] : '-'} (Xero)</td><td class="num">${money(inc.actual)}</td><td class="num muted">Plan ${money0(inc.planToDate)}</td></tr>
+              <tr><td>Plan for the rest of the year <div class="note">Includes the higher salary and Rachel's wages from November</div></td><td class="num">${money(inc.planRest)}</td><td></td></tr>
+            </tbody>
+            <tfoot>
+              <tr><td>Projected taxable profit</td><td class="num">${money(inc.projected)}</td><td class="num muted">Plan ${money0(inc.planYear)}</td></tr>
+              <tr><td>Company tax at 28%</td><td class="num">${money(inc.coTax)}</td><td></td></tr>
+            </tfoot>
+          </table></div>
+          <div style="margin-top:14px">
+            <div class="note">Profit against the provisional tax line (${money0(inc.threshold)} of profit = $5,000 of tax)</div>
+            <div class="meter" title="Projected profit against the provisional tax threshold"><i style="width:${pct * 100}%;${inc.provisionalNext ? 'background:var(--bad)' : ''}"></i></div>
+            <p class="note">${inc.headroom >= 0 ? `${money0(inc.headroom)} of headroom before Greenspace would have to pay provisional tax for the year to 31 Mar ${inc.fyEndY + 1}.` : `${money0(-inc.headroom)} over the line: provisional tax would apply for the year to 31 Mar ${inc.fyEndY + 1}.`}</p>
+          </div>
+          <ul class="story">
+            <li>${inc.lyTaxable == null ? 'Last year\'s result could not be read from Xero.' : `Last year (to 31 Mar ${inc.fyEndY - 1}) Xero shows ${inc.lyTaxable < 0 ? 'a loss of ' + money0(-inc.lyTaxable) : 'a profit of ' + money0(inc.lyTaxable)}, so tax of ${money0(inc.lyTax)}. ${inc.provisionalNow ? 'That is over $5,000, so provisional tax applies this year.' : 'That is under $5,000, so there is no provisional tax this year.'}`}</li>
+            <li>Terminal tax for this year is due ${shortDate(inc.termDate(inc.fyEndY))}${s.agent ? ' (with your tax agent\'s extension)' : ''}. Nothing is payable before then unless provisional tax applies.</li>
+            ${inc.balance ? `<li>The Income Tax account in Xero shows ${money(Math.abs(inc.balance))} ${inc.balance > 0 ? 'owing to IRD' : 'owed back to the company'}.</li>` : ''}
+            ${inc.rwt ? `<li>${money(inc.rwt)} of withholding tax paid (eg RWT on interest) is held in Xero and is credited against the company's tax.</li>` : ''}
+          </ul>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>PAYE and KiwiSaver by month</h2><span class="note">${esc(TAX_PLAN.label)} · Stu on code ${esc(s.stuCode)}, Rachel on code ${esc(s.rachelCode)} · KiwiSaver 3.5% each side</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Pay month</th><th class="num">Stu gross</th><th class="num">Stu PAYE</th><th class="num">Rachel gross</th><th class="num">Rachel PAYE</th><th class="num">KiwiSaver<div class="note">employee + employer</div></th><th class="num">Total to IRD</th><th>Due</th><th>Source</th><th></th></tr></thead>
+          <tbody>${paye.map(r => `<tr${r.total ? '' : ' class="muted-row"'}>
+            <td>${C.monthLabel(r.mk)}</td>
+            <td class="num">${r.stu ? money(r.stu) : '<span class="muted">-</span>'}</td><td class="num">${r.stuPaye ? money(r.stuPaye) : ''}</td>
+            <td class="num">${r.rachel ? money(r.rachel) : '<span class="muted">-</span>'}</td><td class="num">${r.rPaye ? money(r.rPaye) : ''}</td>
+            <td class="num">${r.ks ? money(r.ks * 2) : ''}</td>
+            <td class="num"><b>${r.total ? money(r.total) : ''}</b></td>
+            <td style="white-space:nowrap">${r.total ? shortDate(r.due) : ''}</td>
+            <td class="note">${!r.total && r.source !== 'xero' ? '' : r.source === 'xero' ? `Xero wages ${money0(r.xw)}` : r.source === 'match' ? 'Xero, as planned' : r.done ? 'Plan (no Xero data)' : 'Plan'}</td>
+            <td>${r.total ? (r.due < today && !r.paid ? '<span class="chip">Due date passed</span>' : whenChip(r.due, today, r.paid)) : ''}</td></tr>`).join('')}</tbody>
+          <tfoot><tr><td>Year</td><td class="num">${money0(M.stuYear)}</td><td class="num">${money0(paye.reduce((a, r) => a + r.stuPaye, 0))}</td><td class="num">${money0(M.rachelYear)}</td><td class="num">${money0(paye.reduce((a, r) => a + r.rPaye, 0))}</td><td class="num">${money0(paye.reduce((a, r) => a + r.ks * 2, 0))}</td><td class="num">${money0(paye.reduce((a, r) => a + r.total, 0))}</td><td colspan="3"></td></tr></tfoot>
+        </table></div>
+        <ul class="story">
+          <li>Expected back after 31 March, because monthly PAYE assumes the month's pay runs all year: about <b>${money0(M.stuRefund)}</b> for Stu and <b>${money0(M.rachelRefund)}</b> for Rachel${+s.rachelOther ? ` (allowing ${money0(+s.rachelOther)} of other income)` : ' (assuming no other income)'}.</li>
+          ${s.rachelCode !== 'M' ? `<li>Rachel is on secondary code ${esc(s.rachelCode)}, so her PAYE is ${money(payeMonthly(2000, s.rachelCode))} on $2,000, against ${money(payeMonthly(2000, 'M'))} in the plan workbook (code M). The extra comes back in her year-end refund.</li>` : ''}
+          ${X.bs ? `<li>Xero shows ${money(X.bs.paye + X.bs.deductions)} in PAYE Payable and Wages Deductions Payable today: what posted pay runs owe IRD but has not been paid yet.</li>` : ''}
+          <li>Payments are due by the 20th of the month after payday. Xero Payroll files the employment information with IRD when each pay run is posted.</li>
+        </ul>
+      </div>
+
+      ${M.pays.length ? `<div class="panel">
+        <div class="panel-head"><h2>Recent payments to IRD</h2><span class="note">Spend and receive money to Inland Revenue, or coded to the GST, PAYE or income tax accounts</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Date</th><th>Reference</th><th>For</th><th class="num">Amount</th></tr></thead>
+          <tbody>${M.pays.slice(0, 10).map(p => `<tr><td>${shortDate(p.date)}</td><td>${esc(p.reference || p.contact)}</td>
+            <td>${Object.entries(p.kinds).map(([k, v]) => `${({ gst: 'GST', paye: 'PAYE', incomeTax: 'Income tax', other: 'Other' })[k]} ${money0(v)}`).join(' · ')}</td>
+            <td class="num">${money(p.total)}${p.total < 0 ? ' <span class="note">refund</span>' : ''}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : ''}
+
+      ${taxSettingsHTML()}
+      <p class="note">Updated from Xero at ${updated}. Estimates only: check against myIR and with your accountant before paying or filing.</p>`;
+    wireTax(el);
+  }
+
+  function taxSettingsHTML() {
+    const s = taxSettings();
+    const opt = (v, cur, label) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${label}</option>`;
+    return `<details class="panel"><summary><b>Tax settings</b> <span class="note">GST filing, tax agent and tax codes</span></summary>
+      <div class="kpis kpis-quiet" style="margin-top:12px">
+        <label class="field"><span class="label">GST returns</span><select data-tax="gstMonths">${opt(1, s.gstMonths, 'Monthly')}${opt(2, s.gstMonths, 'Two-monthly')}${opt(6, s.gstMonths, 'Six-monthly')}</select></label>
+        <label class="field"><span class="label">Two-monthly periods end</span><select data-tax="gstCycle" ${+s.gstMonths !== 2 ? 'disabled' : ''}>${opt('odd', s.gstCycle, 'Jan, Mar, May, Jul, Sep, Nov')}${opt('even', s.gstCycle, 'Feb, Apr, Jun, Aug, Oct, Dec')}</select></label>
+        <label class="field"><span class="label">GST basis</span><select data-tax="gstBasis">${opt('invoice', s.gstBasis, 'Invoice basis')}${opt('payments', s.gstBasis, 'Payments basis')}</select></label>
+        <label class="field"><span class="label">Tax agent (extension of time)</span><select data-tax="agent">${opt(true, s.agent, 'Yes: returns 31 Mar, terminal tax 7 Apr')}${opt(false, s.agent, 'No: returns 7 Jul, terminal tax 7 Feb')}</select></label>
+        <label class="field"><span class="label">Stu tax code</span><select data-tax="stuCode">${['M', 'SB', 'S', 'SH', 'ST', 'SA'].map(c => opt(c, s.stuCode, c)).join('')}</select></label>
+        <label class="field"><span class="label">Rachel tax code</span><select data-tax="rachelCode">${['M', 'SB', 'S', 'SH', 'ST', 'SA'].map(c => opt(c, s.rachelCode, c)).join('')}</select></label>
+        <label class="field"><span class="label">Rachel other income this year</span><input data-tax="rachelOther" type="number" step="100" min="0" value="${+s.rachelOther || 0}"></label>
+      </div>
+      <p class="note">Check your GST frequency and basis in myIR. These settings are saved with the app.</p></details>`;
+  }
+  function wireTax(el) {
+    $('#tRefresh', el).onclick = () => { state.tax.data = null; state.tax.error = null; loadTax(); route(); };
+    $$('[data-tax]', el).forEach(i => i.onchange = () => {
+      const s = taxSettings(), k = i.dataset.tax;
+      s[k] = k === 'agent' ? i.value === 'true' : k === 'gstMonths' || k === 'rachelOther' ? +i.value || 0 : i.value;
+      saveSettings();
+      const open = $('details.panel', el)?.open;
+      if (k.startsWith('gst')) { state.tax.data = null; state.tax.error = null; loadTax(); }
+      renderTax(el);
+      const d = $('details.panel', el); if (d && open) d.open = true;
+    });
+  }
 
 
   // ======================================================================
