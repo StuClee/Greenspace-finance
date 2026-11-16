@@ -524,7 +524,7 @@
         { label: 'Target', data: s.daily.map(x => x.cumTarget), borderColor: soil, borderDash: [5, 4], pointRadius: 0, borderWidth: 2, fill: false }
       ] },
       options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { title: i => C.fmtDateLong(s.daily[i[0].dataIndex].date), label: c => `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
-        scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 10 } }, y: { beginAtZero: true, grid: { color: line }, ticks: { callback: fmtK } } } }
+        scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 10, callback: (v, i) => [labels[i], Math.round((i + 1) / labels.length * 100) + '%'] } }, y: { beginAtZero: true, grid: { color: line }, ticks: { callback: fmtK } } } }
     });
     const ms = months.map(m => C.monthStats(state.data, m));
     state.charts.months = new Chart($('#cMonths'), {
