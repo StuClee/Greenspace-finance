@@ -700,7 +700,7 @@
     const updated = new Date(X.fetchedAt).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' });
 
     el.innerHTML = head + `
-      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect ? ' · <a href="/api/xero-connect?back=performance">Reconnect Xero</a> to allow reports.' : ''}</div>` : ''}
+      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect || X.errors.some(e => /401|not authori[sz]ed/i.test(e)) ? ' · Xero is not allowing this data. <a href="/api/xero-connect?back=performance">Reconnect Xero</a> and allow access when Xero asks.' : ''}</div>` : ''}
 
       <div class="kpis">
         ${kpi('Revenue', ty.income, ly.income, { lead: true, sub: outlook ? `Full-year outlook ${moneyK(outlook.income)} (last year ${moneyK(outlook.lyIncome)})` : '' })}
@@ -1362,7 +1362,7 @@
     const kindChip = k => `<span class="chip">${k}</span>`;
 
     el.innerHTML = head + `
-      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect ? ' · <a href="/api/xero-connect?back=tax">Reconnect Xero</a> to allow reports.' : ''}</div>` : ''}
+      ${X.errors?.length ? `<div class="callout">Some figures could not be read from Xero: ${X.errors.map(esc).join('; ')}${X.needsReconnect || X.errors.some(e => /401|not authori[sz]ed/i.test(e)) ? ' · Xero is not allowing this data. <a href="/api/xero-connect?back=tax">Reconnect Xero</a> and allow access when Xero asks.' : ''}</div>` : ''}
       ${gst.prevIrd && !gst.prevDone ? `<div class="callout"><b>GST for ${periodText(gst.prev)} is overdue.</b> myIR showed ${money(gst.prevIrd.toPay + gst.prevIrd.pen + gst.prevIrd.int)} due now at ${shortDate(TAX_IRD.asAt)} (${money(gst.prevIrd.toPay)} GST, ${money(gst.prevIrd.pen)} late payment penalty, ${money(gst.prevIrd.int)} interest, still growing). It was due ${shortDate(gst.prevDue)}.</div>` : ''}
 
       <div class="kpis">
