@@ -2,19 +2,28 @@
 import { getStore } from '@netlify/blobs';
 
 export const env = k => (globalThis.Netlify?.env?.get(k)) ?? process.env[k];
-const BASE_SCOPES = 'openid profile email offline_access accounting.transactions accounting.contacts.read accounting.attachments';
+// Xero is replacing the broad accounting.transactions scope with granular ones (invoices, payments, bank transactions).
+// Granular by default; ?tx=broad on xero-connect asks for the old broad scope instead.
+const BASE_SCOPES = 'openid profile email offline_access accounting.contacts.read accounting.attachments';
+export const TX_SCOPES = { granular: 'accounting.invoices accounting.payments.read accounting.banktransactions.read', broad: 'accounting.transactions' };
 // Report scopes for the Performance page. Granular names by default; ?reports=legacy (or XERO_REPORT_SCOPES) uses the older broad scope.
 export const REPORT_SCOPES = { granular: 'accounting.reports.profitandloss.read accounting.reports.balancesheet.read', legacy: 'accounting.reports.read' };
 // Payroll scopes (read only) for the wages and PAYE split by person. XERO_PAYROLL_SCOPES=none leaves them out.
 export const PAYROLL_SCOPES = 'payroll.payruns.read payroll.payslip.read';
-export const SCOPES = (variant = 'granular', payroll = true) => {
-  const base = (env('XERO_SCOPES') || BASE_SCOPES).split(/\s+/).filter(Boolean);
+export const SCOPES = (variant = 'granular', payroll = true, tx = 'granular') => {
+  const base = (env('XERO_SCOPES') || BASE_SCOPES + ' ' + (TX_SCOPES[tx] || TX_SCOPES.granular)).split(/\s+/).filter(Boolean);
   const extra = (env('XERO_REPORT_SCOPES') || REPORT_SCOPES[variant] || REPORT_SCOPES.granular).split(/\s+/);
   const ps = env('XERO_PAYROLL_SCOPES') || PAYROLL_SCOPES;
   const pay = payroll && ps !== 'none' ? ps.split(/\s+/) : [];
   return [...new Set([...base, ...extra, ...pay])].filter(Boolean).join(' ');
 };
 export const hasReportScopes = scope => !scope ? null : /accounting\.reports\.read|accounting\.reports\.profitandloss\.read/.test(scope);
+// Which data the saved token can read: { invoices, payments, bank } true/false (null if unknown)
+export const txAccess = scope => !scope ? null : {
+  invoices: /accounting\.transactions\b|accounting\.invoices\b/.test(scope),
+  payments: /accounting\.transactions\b|accounting\.payments\b/.test(scope),
+  bank: /accounting\.transactions\b|accounting\.banktransactions\b/.test(scope)
+};
 export const hasPayrollScopes = scope => !scope ? null : /payroll\.payruns(\.read)?\b/.test(scope) && /payroll\.payslip(\.read)?\b/.test(scope);
 export const redirectUri = req => env('XERO_REDIRECT_URI') || new URL('/api/xero-callback', req.url).toString();
 export const configured = () => !!(env('XERO_CLIENT_ID') && env('XERO_CLIENT_SECRET'));
