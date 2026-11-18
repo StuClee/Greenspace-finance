@@ -901,6 +901,52 @@
     const shown = people.filter(p => tot.ty[p.id].runs || tot.ly[p.id].runs);
     return { people: shown, tot, months };
   }
+  // Stuart only: PAYE taken against what IRD will assess on the year's income (income tax + ACC earner levy).
+  // Assumes salary is his only income. Full year = pay runs to date + the FY27 plan for the months still to come.
+  const isStu = p => /^s(tu(art)?)?\b.*cameron/i.test(p.name);
+  function stuTaxModel(P, X) {
+    const stu = P.people.find(isStu); if (!stu) return null;
+    const code = taxSettings().stuCode || 'M';
+    const a = P.tot.ty[stu.id];
+    const toDate = { gross: a.gross, paye: a.paye };
+    const asMk = X.asAt.slice(0, 7), endOfMonth = X.asAt === C.monthEnd(asMk);
+    const paidIn = new Set(P.months.filter(m => m.by[stu.id]?.runs).map(m => m.mk));
+    const rest = TAX_PLAN.months.filter(p => p.mk > asMk || (p.mk === asMk && !endOfMonth && !paidIn.has(p.mk)));
+    const restGross = rest.reduce((t, p) => t + p.stu, 0), restPaye = rest.reduce((t, p) => t + payeMonthly(p.stu, code), 0);
+    const year = { gross: toDate.gross + restGross, paye: toDate.paye + restPaye };
+    const assess = o => { o.tax = C.round2(personalTax(o.gross)); o.acc = C.round2(accLevy(o.gross)); o.ird = C.round2(o.tax + o.acc); o.diff = C.round2(o.paye - o.ird); return o; };
+    return { stu, code, toDate: assess(toDate), year: assess(year), rest, restGross, restPaye };
+  }
+  function stuTaxHTML(T) {
+    if (!T) return '';
+    const verdict = o => Math.abs(o.diff) < 1 ? '<span class="chip ok">About right</span>'
+      : o.diff > 0 ? `<span class="chip ok">Over-deducted: about ${money0(o.diff)} back</span>`
+      : `<span class="chip bad">Under-deducted: about ${money0(-o.diff)} to pay</span>`;
+    const row = (label, k, note = '') => `<tr><td>${label}${note ? `<div class="note">${note}</div>` : ''}</td><td class="num">${money(T.toDate[k])}</td><td class="num">${money(T.year[k])}</td></tr>`;
+    const rng = T.rest.length ? `${C.monthLabel(T.rest[0].mk)} to ${C.monthLabel(T.rest[T.rest.length - 1].mk)}` : '';
+    const story = [];
+    const y = T.year, d = T.toDate;
+    story.push(y.diff >= 0
+      ? `If the year finishes as planned, PAYE will be about <b>${money0(y.diff)}</b> more than IRD's assessment on ${money0(y.gross)} of salary, so expect a refund of roughly that after 31 March.`
+      : `If the year finishes as planned, PAYE will be about <b>${money0(-y.diff)}</b> short of IRD's assessment on ${money0(y.gross)} of salary, so expect a bill of roughly that after 31 March.`);
+    if (Math.abs(d.diff - y.diff) >= 50) story.push(`On pay to date alone the gap is ${money0(Math.abs(d.diff))} ${d.diff >= 0 ? 'over' : 'under'}. Code ${esc(T.code)} taxes each month's pay as if it ran all year, so months with no pay${T.rest.length ? ' and the higher salary to come' : ''} move the result.`);
+    return `<div style="margin-top:18px">
+      <div class="panel-head"><h3>${esc(T.stu.name)}: tax paid against IRD assessment</h3><span class="note">Tax code ${esc(T.code)} · 2026/27 rates · ACC earner levy ${(TAXR.acc * 100).toFixed(2)}% up to ${money0(TAXR.accCap)}</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th></th><th class="num">Pay to date</th><th class="num">Full year<div class="note">${rng ? `pay to date + plan ${rng}` : 'pay runs'}</div></th></tr></thead>
+        <tbody>
+          ${row('Gross salary', 'gross')}
+          ${row('PAYE deducted', 'paye', 'Includes ACC earner levy' + (T.rest.length ? `; plan months at code ${esc(T.code)}` : ''))}
+          ${row('Income tax on that salary', 'tax')}
+          ${row('ACC earner levy', 'acc')}
+          ${row('IRD assessment', 'ird', 'Income tax + ACC levy, as on the year-end assessment')}
+        </tbody>
+        <tfoot><tr><td>PAYE less assessment</td><td class="num">${money(d.diff)}<div>${verdict(d)}</div></td><td class="num">${money(y.diff)}<div>${verdict(y)}</div></td></tr></tfoot>
+      </table></div>
+      <ul class="story">${story.map(x => `<li>${x}</li>`).join('')}</ul>
+      <p class="note">Assumes salary is ${esc(T.stu.name.split(' ')[0])}'s only income for 2026/27. Other income (interest, dividends, rent, shareholder salary paid without PAYE) changes the assessment. "Pay to date" treats the pay so far as the whole year's income.</p>
+    </div>`;
+  }
   function payrollHTML(X) {
     const PR = state.perf.payroll, key = payKey(X), J = PR.cache[key];
     if (!J && !PR.loading && !PR.error) { PR.loading = true; setTimeout(() => loadPayroll(X)); }
@@ -944,6 +990,7 @@
       <tr class="muted-row"><td>Last year, same point</td>${people.map(p => `<td class="num">${money0(tot.ly[p.id].gross)}</td><td class="num">${money0(tot.ly[p.id].paye + tot.ly[p.id].studentLoan)}</td>`).join('')}
       <td class="num">${money0(people.reduce((a, p) => a + tot.ly[p.id].ksEmployee + tot.ly[p.id].ksEmployer, 0))}</td><td class="num">${money0(people.reduce((a, p) => a + tot.ly[p.id].toIrd, 0))}</td><td></td></tr>`;
     const ks = people.map(p => { const a = tot.ty[p.id]; return a.ksEmployee || a.ksEmployer ? `${esc(p.name)} ${money0(a.ksEmployee)} employee + ${money0(a.ksEmployer)} employer${a.esct ? ` (incl ${money0(a.esct)} ESCT)` : ''}` : ''; }).filter(Boolean);
+    const stuTax = stuTaxHTML(stuTaxModel(P, X));
     return `<div class="panel wages">${head}
       <div class="kpis kpis-quiet">${cards}</div>
       ${J.errors?.length ? `<div class="callout">Some pay runs could not be read: ${J.errors.map(esc).join('; ')}</div>` : ''}
@@ -953,6 +1000,7 @@
         <tfoot>${foot}</tfoot>
       </table></div>
       <p class="note">PAYE includes the ACC earner levy${people.some(p => tot.ty[p.id].studentLoan) ? ' and student loan deductions' : ''}. Total to IRD = PAYE + KiwiSaver both sides, as filed in the employment information return. ${ks.length ? 'KiwiSaver this year: ' + ks.join('; ') + '. ' : ''}myIR filed is the snapshot read from myIR on 15 Nov 2026.${months.some(m => m.fromIrd) ? ` Months marked myIR are not in any posted Xero pay run: PAYE and KiwiSaver are what was filed with IRD less the pay runs, credited to ${esc(MYIR_GAP.person)}; gross is estimated from her KiwiSaver at ${pctTxt(MYIR_GAP.ksRate)}. Post those pay runs in Xero to replace the estimates.` : ''}</p>
+      ${stuTax}
     </div>`;
   }
 
@@ -1097,10 +1145,10 @@
       ['2027-02', -9426.03, 20676.63, 2000], ['2027-03', -9411.32, 20676.63, 2000]
     ].map(([mk, np, stu, rachel]) => ({ mk, np, stu, rachel }))
   };
-  // What myIR showed on 15 Nov 2026 (read by Claude): filed returns, penalties and interest, and whether paid.
-  // GST is on the payments (cash) basis, two-monthly, periods ending odd months. Income tax return for FY26 due 31 Mar 2027 (agent).
   // Pay that myIR shows but no posted Xero pay run holds (Jun to Aug 2026), credited to this person on the Performance page
   const MYIR_GAP = { person: 'Lily-Rose Cameron-Lee', ksRate: 0.035 };
+  // What myIR showed on 15 Nov 2026 (read by Claude): filed returns, penalties and interest, and whether paid.
+  // GST is on the payments (cash) basis, two-monthly, periods ending odd months. Income tax return for FY26 due 31 Mar 2027 (agent).
   const TAX_IRD = {
     asAt: '2026-11-15',
     gst: {
