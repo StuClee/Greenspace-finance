@@ -23,21 +23,26 @@ async function pool(jobs, n = 4) {
   return out;
 }
 
-// One payslip -> the figures above
+// One payslip -> the figures above.
+// NZ payslips: superannuationLines hold the employer KiwiSaver (often just named "KiwiSaver");
+// statutoryDeductionLines hold the employee KiwiSaver, student loan and child support, usually with no name.
+const KS_RATES = [3, 3.5, 4, 6, 8, 10];
 export function slipRow(s) {
   const gross = num(s.grossEarnings ?? s.totalEarnings);
   const paye = num(s.totalEmployeeTaxes);
-  let ksEmployee = 0, ksEmployer = 0, esct = 0, studentLoan = 0, otherDeductions = 0, employerPct = null;
+  const isRate = a => KS_RATES.some(r => Math.abs(a - gross * r / 100) <= 0.05);
+  let ksEmployee = 0, ksEmployer = 0, esct = 0, studentLoan = 0, otherStatutory = 0, otherDeductions = 0, employerPct = null;
   for (const l of s.superannuationLines || []) {
     const a = num(l.amount), n = nameOf(l);
-    if (/employer/.test(n)) { ksEmployer += a; if (l.percentage != null) employerPct = num(l.percentage); }
-    else ksEmployee += a;
+    if (/employee/.test(n)) ksEmployee += a;
+    else { ksEmployer += a; if (l.percentage != null) employerPct = num(l.percentage); }
   }
   for (const l of s.statutoryDeductionLines || []) {
     const a = num(l.amount), n = nameOf(l);
     if (/student/.test(n)) studentLoan += a;
-    else if (/kiwi|super/.test(n)) { if (/employer/.test(n)) ksEmployer += a; else ksEmployee += a; }
-    else otherDeductions += a;
+    else if (/employer/.test(n)) ksEmployer += a;
+    else if (/kiwi|super/.test(n) || (!n.trim() && isRate(a) && !ksEmployee)) ksEmployee += a;
+    else otherStatutory += a;                                            // student loan / child support with no name
   }
   for (const l of s.employerTaxLines || []) {
     const n = nameOf(l);
@@ -48,7 +53,23 @@ export function slipRow(s) {
   if (esct && ksEmployer && employerPct && Math.abs(ksEmployer - gross * employerPct / 100) > 0.05 && Math.abs(ksEmployer + esct - gross * employerPct / 100) <= 0.05) ksEmployer += esct;
   for (const l of s.deductionLines || []) otherDeductions += num(l.amount);
   const net = num(s.totalPay);
-  return { gross, paye, ksEmployee, ksEmployer, esct, studentLoan, otherDeductions, net, toIrd: paye + studentLoan + ksEmployee + ksEmployer, slips: 1 };
+  return { gross, paye, ksEmployee, ksEmployer, esct, studentLoan: studentLoan + otherStatutory, otherDeductions, net, toIrd: paye + studentLoan + otherStatutory + ksEmployee + ksEmployer, slips: 1 };
+}
+
+// Reads every page of a payroll list. Xero's page size varies, so stop on its pagination or an empty page.
+async function allPages(t, path, key) {
+  const out = []; let prev = null;
+  for (let page = 1; page <= 50; page++) {
+    const b = await payrollApi(t, `${path}${path.includes('?') ? '&' : '?'}page=${page}`);
+    const list = b[key] || b[key[0].toUpperCase() + key.slice(1)] || [];
+    const first = JSON.stringify(list[0] || null);
+    if (first === prev) break;                                           // page ignored: same page again
+    prev = first;
+    out.push(...list);
+    const pg = b.pagination;
+    if (!list.length || (pg && pg.pageCount != null && pg.page >= pg.pageCount)) break;
+  }
+  return out;
 }
 
 export default async (req) => {
@@ -60,26 +81,19 @@ export default async (req) => {
     const t = await session();
     if (hasPayrollScopes(t.scope) === false) return json({ error: 'Xero has not allowed payroll access yet', needsReconnect: true }, 403);
 
-    // Pay runs (100 a page), newest pages may come first, so read them all and filter
-    const runs = [];
-    for (let page = 1; page <= 20; page++) {
-      const b = await payrollApi(t, `/PayRuns?page=${page}`);
-      const list = b.payRuns || b.PayRuns || [];
-      runs.push(...list);
-      const pg = b.pagination; if (!list.length || (pg && pg.page >= pg.pageCount) || list.length < 100) break;
-    }
+    const runs = await allPages(t, '/PayRuns', 'payRuns');
     const wanted = runs.filter(r => /posted/i.test(r.payRunStatus || '') && day(r.paymentDate) >= from && day(r.paymentDate) <= to);
 
-    const res = await pool(wanted.map(r => async () => {
-      const slips = [];
-      for (let page = 1; page <= 10; page++) {
-        const b = await payrollApi(t, `/PaySlips?PayRunID=${r.payRunID}&page=${page}`);
-        const list = b.paySlips || b.PaySlips || [];
-        slips.push(...list);
-        const pg = b.pagination; if (!list.length || (pg && pg.page >= pg.pageCount) || list.length < 100) break;
-      }
-      return { run: r, slips };
-    }));
+    const res = await pool(wanted.map(r => async () => ({ run: r, slips: await allPages(t, `/PaySlips?PayRunID=${r.payRunID}`, 'paySlips') })));
+
+    // ?debug=1: the line names and amounts of the latest payslip per employee, to check how Xero labels them
+    if (u.searchParams.get('debug') === '1') {
+      const last = new Map();
+      for (const x of res) if (x.ok) for (const s of x.v.slips) last.set(s.employeeID, { date: day(x.v.run.paymentDate), name: `${s.firstName} ${s.lastName}`,
+        totals: { grossEarnings: s.grossEarnings, totalEmployeeTaxes: s.totalEmployeeTaxes, totalEmployerTaxes: s.totalEmployerTaxes, totalDeductions: s.totalDeductions, totalPay: s.totalPay },
+        lines: Object.fromEntries(['superannuationLines', 'statutoryDeductionLines', 'deductionLines', 'employeeTaxLines', 'employerTaxLines'].map(k => [k, (s[k] || []).map(l => ({ name: l.displayName || l.description || l.name || '', amount: l.amount, percentage: l.percentage }))])) });
+      return json({ runsListed: runs.length, runsInRange: wanted.length, latest: [...last.values()] });
+    }
 
     const people = new Map(), entries = [], errors = [];
     for (const x of res) {
