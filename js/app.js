@@ -859,8 +859,8 @@
   const personOrder = p => (/^s(tu(art)?)?\b.*cameron/i.test(p.name) ? '0' : '1') + p.name.toLowerCase();
   function payrollModel(J, X) {
     const people = [...J.people].sort((a, b) => personOrder(a) < personOrder(b) ? -1 : 1);
-    const blank = () => ({ gross: 0, paye: 0, ksEmployee: 0, ksEmployer: 0, esct: 0, studentLoan: 0, toIrd: 0, net: 0, runs: 0 });
-    const add = (o, e) => { for (const k of Object.keys(o)) if (k !== 'runs') o[k] += e[k] || 0; o.runs++; };
+    const blank = () => ({ gross: 0, paye: 0, ksEmployee: 0, ksEmployer: 0, esct: 0, studentLoan: 0, toIrd: 0, net: 0, runs: 0, fromIrd: 0 });
+    const add = (o, e) => { for (const k of Object.keys(o)) if (k !== 'runs' && k !== 'fromIrd') o[k] += e[k] || 0; o.runs++; };
     const tot = { ty: {}, ly: {} };
     people.forEach(p => { tot.ty[p.id] = blank(); tot.ly[p.id] = blank(); });
     const fyMk = X.fyStart.slice(0, 7), n = Math.max(1, (X.nMonths || 1));
@@ -872,6 +872,24 @@
         const i = mIdx.get(e.date.slice(0, 7)); if (i != null) add(months[i].by[e.id], e);
       } else if (e.date >= X.lyFyStart && e.date <= X.lyAsAt) add(tot.ly[e.id], e);
     }
+    // Pay filed in myIR but not in any posted Xero pay run: shown for MYIR_GAP.person, worked out from myIR.
+    // PAYE = myIR PAYE less the pay runs' PAYE; KiwiSaver = the rest of the myIR total, split evenly;
+    // gross is estimated from the employee KiwiSaver at MYIR_GAP.ksRate.
+    let gapP = people.find(p => p.name.toLowerCase() === MYIR_GAP.person.toLowerCase());
+    for (const m of months) {
+      const f = TAX_IRD.paye[m.mk]; if (!f) continue;
+      const v = Object.values(m.by);
+      const runTotal = v.reduce((a, o) => a + o.toIrd, 0), runPaye = v.reduce((a, o) => a + o.paye + o.studentLoan, 0);
+      const gap = C.round2(f.total - runTotal), gPaye = C.round2(f.paye - runPaye);
+      if (gap <= 1 || gPaye < 0) continue;
+      if (!gapP) { gapP = { id: 'myir-gap', name: MYIR_GAP.person }; people.push(gapP); tot.ty[gapP.id] = blank(); tot.ly[gapP.id] = blank(); months.forEach(x => { x.by[gapP.id] = blank(); }); }
+      const ks = C.round2((gap - gPaye) / 2);
+      const e = { gross: C.round2(ks / MYIR_GAP.ksRate), paye: gPaye, ksEmployee: ks, ksEmployer: C.round2(gap - gPaye - ks), toIrd: gap, fromIrd: 1 };
+      add(m.by[gapP.id], e); add(tot.ty[gapP.id], e);
+      m.by[gapP.id].fromIrd = 1; tot.ty[gapP.id].fromIrd = (tot.ty[gapP.id].fromIrd || 0) + 1;
+      m.fromIrd = true;
+    }
+    people.sort((a, b) => personOrder(a) < personOrder(b) ? -1 : 1);
     for (const m of months) {
       const v = Object.values(m.by);
       m.paye = v.reduce((a, o) => a + o.paye + o.studentLoan, 0);
@@ -901,13 +919,18 @@
     const rate = o => o.gross ? pctTxt(o.paye / o.gross) : '-';
     const cards = people.map(p => {
       const a = tot.ty[p.id], b = tot.ly[p.id];
-      return `${kpi(`${esc(p.name)}: gross pay`, a.gross, b.gross, { good: null, sub: `${a.runs} pay run${a.runs === 1 ? '' : 's'} this year (last year ${b.runs})` })}
+      const runs = a.runs - (a.fromIrd || 0);
+      const sub = a.fromIrd ? `${a.fromIrd} month${a.fromIrd === 1 ? '' : 's'} from myIR, gross estimated${runs ? ` · ${runs} pay run${runs === 1 ? '' : 's'}` : ''} (last year ${b.runs})` : `${a.runs} pay run${a.runs === 1 ? '' : 's'} this year (last year ${b.runs})`;
+      return `${kpi(`${esc(p.name)}: gross pay`, a.gross, b.gross, { good: null, sub })}
         ${kpi(`${esc(p.name)}: PAYE`, a.paye + a.studentLoan, b.paye + b.studentLoan, { good: null, sub: `${rate(a)} of gross (last year ${rate(b)}) · incl ACC levy${a.studentLoan ? ' and student loan' : ''}` })}`;
     }).join('');
     const cols = people.map(p => `<th class="num">${esc(p.name)}<div class="note">gross</div></th><th class="num">${esc(p.name)}<div class="note">PAYE</div></th>`).join('');
-    const cell = (o, k) => o.runs ? money(k === 'paye' ? o.paye + o.studentLoan : o[k]) : '<span class="muted">-</span>';
+    const cell = (o, k) => !o.runs ? '<span class="muted">-</span>'
+      : o.fromIrd ? (k === 'gross' ? `<span title="Estimated from the KiwiSaver filed in myIR (${pctTxt(MYIR_GAP.ksRate)} of gross)">&asymp; ${money(o.gross)}</span>` : `<span title="From myIR">${money(o.paye + o.studentLoan)}</span>`) + ' <span class="chip">myIR</span>'
+      : money(k === 'paye' ? o.paye + o.studentLoan : o[k]);
     const check = m => {
       if (!m.ird) return '<span class="muted">-</span>';
+      if (m.fromIrd) return `<span class="chip" title="myIR: PAYE ${money(m.ird.paye)}, total ${money(m.ird.total)}. Part of this month is not in any posted Xero pay run, so it is taken from myIR.">Part from myIR</span>`;
       const d = Math.abs(m.ird.total - m.toIrd) <= 1 && Math.abs(m.ird.paye - m.paye) <= 1;
       return d ? `<span class="chip ok" title="myIR: PAYE ${money(m.ird.paye)}, total ${money(m.ird.total)}">Matches</span>`
         : `<span class="chip warn" title="myIR: PAYE ${money(m.ird.paye)}, total ${money(m.ird.total)}">myIR ${money(m.ird.total)}</span>`;
@@ -929,7 +952,7 @@
         <tbody>${rows}</tbody>
         <tfoot>${foot}</tfoot>
       </table></div>
-      <p class="note">PAYE includes the ACC earner levy${people.some(p => tot.ty[p.id].studentLoan) ? ' and student loan deductions' : ''}. Total to IRD = PAYE + KiwiSaver both sides, as filed in the employment information return. ${ks.length ? 'KiwiSaver this year: ' + ks.join('; ') + '. ' : ''}myIR filed is the snapshot read from myIR on 15 Nov 2026.</p>
+      <p class="note">PAYE includes the ACC earner levy${people.some(p => tot.ty[p.id].studentLoan) ? ' and student loan deductions' : ''}. Total to IRD = PAYE + KiwiSaver both sides, as filed in the employment information return. ${ks.length ? 'KiwiSaver this year: ' + ks.join('; ') + '. ' : ''}myIR filed is the snapshot read from myIR on 15 Nov 2026.${months.some(m => m.fromIrd) ? ` Months marked myIR are not in any posted Xero pay run: PAYE and KiwiSaver are what was filed with IRD less the pay runs, credited to ${esc(MYIR_GAP.person)}; gross is estimated from her KiwiSaver at ${pctTxt(MYIR_GAP.ksRate)}. Post those pay runs in Xero to replace the estimates.` : ''}</p>
     </div>`;
   }
 
@@ -1076,6 +1099,8 @@
   };
   // What myIR showed on 15 Nov 2026 (read by Claude): filed returns, penalties and interest, and whether paid.
   // GST is on the payments (cash) basis, two-monthly, periods ending odd months. Income tax return for FY26 due 31 Mar 2027 (agent).
+  // Pay that myIR shows but no posted Xero pay run holds (Jun to Aug 2026), credited to this person on the Performance page
+  const MYIR_GAP = { person: 'Lily-Rose Cameron-Lee', ksRate: 0.035 };
   const TAX_IRD = {
     asAt: '2026-11-15',
     gst: {
