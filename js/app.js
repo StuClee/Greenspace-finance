@@ -876,7 +876,9 @@
     // PAYE = myIR PAYE less the pay runs' PAYE; KiwiSaver = the rest of the myIR total, split evenly;
     // gross is estimated from the employee KiwiSaver at MYIR_GAP.ksRate.
     let gapP = people.find(p => p.name.toLowerCase() === MYIR_GAP.person.toLowerCase());
-    for (const m of months) {
+    // Only when every pay run was read: a pay run Xero did not return would otherwise be credited to the wrong person
+    const complete = J.complete !== false && !(J.errors || []).length;
+    for (const m of complete ? months : []) {
       const f = TAX_IRD.paye[m.mk]; if (!f) continue;
       const v = Object.values(m.by);
       const runTotal = v.reduce((a, o) => a + o.toIrd, 0), runPaye = v.reduce((a, o) => a + o.paye + o.studentLoan, 0);
@@ -899,7 +901,7 @@
     }
     // Only people paid in either period
     const shown = people.filter(p => tot.ty[p.id].runs || tot.ly[p.id].runs);
-    return { people: shown, tot, months };
+    return { people: shown, tot, months, complete };
   }
   // Stuart only: PAYE taken against what IRD will assess on the year's income (income tax + ACC earner levy).
   // Assumes salary is his only income. Full year = pay runs to date + the FY27 plan for the months still to come.
@@ -993,7 +995,7 @@
     const stuTax = stuTaxHTML(stuTaxModel(P, X));
     return `<div class="panel wages">${head}
       <div class="kpis kpis-quiet">${cards}</div>
-      ${J.errors?.length ? `<div class="callout">Some pay runs could not be read: ${J.errors.map(esc).join('; ')}</div>` : ''}
+      ${!P.complete ? `<div class="callout">${J.missing || 'Some'} pay run${J.missing === 1 ? '' : 's'} could not be read from Xero${J.errors?.length ? ` (${J.errors.map(esc).join('; ')})` : ''}, so these figures are incomplete and nothing is filled in from myIR. Click Refresh at the top of the page in a minute; pay runs already read are kept, so it only asks Xero for the rest.</div>` : ''}
       <div class="table-wrap"><table>
         <thead><tr><th>Pay month</th>${cols}<th class="num">KiwiSaver<div class="note">employee + employer</div></th><th class="num">Total to IRD</th><th>myIR filed</th></tr></thead>
         <tbody>${rows}</tbody>
