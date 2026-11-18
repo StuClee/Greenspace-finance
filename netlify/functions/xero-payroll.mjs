@@ -1,4 +1,10 @@
 import { session, payrollApi, json, hasPayrollScopes } from './_xero.mjs';
+import { getStore } from '@netlify/blobs';
+
+// Posted pay runs do not change, so each one's payslips are read from Xero once and kept in Netlify Blobs
+// (store "xero", key payslips-v1: { [payRunID]: { date, slips: [{ id, name, ...slipRow }] } }). ?fresh=1 ignores the store.
+const CACHE_KEY = 'payslips-v1';
+const cacheStore = () => getStore('xero');
 
 // GET /api/xero-payroll?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Posted Xero (NZ) pay runs paid between from and to, split by employee and by pay month (payment date).
@@ -84,7 +90,11 @@ export default async (req) => {
     const runs = await allPages(t, '/PayRuns', 'payRuns');
     const wanted = runs.filter(r => /posted/i.test(r.payRunStatus || '') && day(r.paymentDate) >= from && day(r.paymentDate) <= to);
 
-    const res = await pool(wanted.map(r => async () => ({ run: r, slips: await allPages(t, `/PaySlips?PayRunID=${r.payRunID}`, 'paySlips') })));
+    const debug = u.searchParams.get('debug') === '1', fresh = u.searchParams.get('fresh') === '1' || debug;
+    let cache = {};
+    if (!fresh) { try { cache = (await cacheStore().get(CACHE_KEY, { type: 'json' })) || {}; } catch { cache = {}; } }
+    const todo = debug ? wanted.slice(-3) : wanted.filter(r => !cache[r.payRunID]).slice(0, 40);   // keep within the function time limit
+    const res = await pool(todo.map(r => async () => ({ run: r, slips: await allPages(t, `/PaySlips?PayRunID=${r.payRunID}`, 'paySlips') })), 2);
 
     // ?debug=1: the line names and amounts of the latest payslip per employee, to check how Xero labels them
     if (u.searchParams.get('debug') === '1') {
@@ -95,21 +105,32 @@ export default async (req) => {
       return json({ runsListed: runs.length, runsInRange: wanted.length, latest: [...last.values()] });
     }
 
-    const people = new Map(), entries = [], errors = [];
+    // New runs: summarise and add to the store
+    const errors = [];
+    let added = 0;
     for (const x of res) {
       if (!x.ok) { errors.push(x.e.message); continue; }
-      const date = day(x.v.run.paymentDate), byId = new Map();
-      for (const s of x.v.slips) {
-        const id = s.employeeID || `${s.firstName} ${s.lastName}`;
-        if (!people.has(id)) people.set(id, { id, name: `${s.firstName || ''} ${s.lastName || ''}`.trim() || 'Unnamed employee' });
-        const row = slipRow(s), o = byId.get(id);
-        if (!o) byId.set(id, { date, id, ...row }); else for (const k of Object.keys(row)) o[k] += row[k];
+      cache[x.v.run.payRunID] = { date: day(x.v.run.paymentDate), slips: x.v.slips.map(s => ({ id: s.employeeID || `${s.firstName} ${s.lastName}`, name: `${s.firstName || ''} ${s.lastName || ''}`.trim() || 'Unnamed employee', ...slipRow(s) })) };
+      added++;
+    }
+    if (added) { try { await cacheStore().setJSON(CACHE_KEY, cache); } catch (e) { /* store is a convenience; carry on */ } }
+
+    const people = new Map(), entries = [];
+    let missing = 0;
+    for (const r of wanted) {
+      const c = cache[r.payRunID];
+      if (!c) { missing++; continue; }
+      const byId = new Map();
+      for (const s of c.slips) {
+        if (!people.has(s.id)) people.set(s.id, { id: s.id, name: s.name });
+        const { id, name, ...row } = s, o = byId.get(id);
+        if (!o) byId.set(id, { date: c.date, id, ...row }); else for (const k of Object.keys(row)) o[k] += row[k];
       }
       for (const o of byId.values()) { for (const k of Object.keys(o)) if (typeof o[k] === 'number' && k !== 'slips') o[k] = r2(o[k]); entries.push(o); }
     }
     entries.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
     const needsReconnect = errors.some(m => scopeErr({ message: m }));
-    return json({ from, to, people: [...people.values()], entries, runs: wanted.length, needsReconnect, errors, fetchedAt: new Date().toISOString() });
+    return json({ from, to, people: [...people.values()], entries, runs: wanted.length, missing, fromXero: added, needsReconnect, errors: [...new Set(errors)], complete: missing === 0, fetchedAt: new Date().toISOString() });
   } catch (e) {
     return json({ error: e.message, needsReconnect: scopeErr(e) || /not connected/i.test(e.message) }, scopeErr(e) ? 403 : 502);
   }

@@ -62,17 +62,26 @@ export const xeroApi = (t, path, init = {}) => callXero('https://api.xero.com/ap
 // NZ Payroll API (v2): camelCase JSON, errors in body.problem
 export const payrollApi = (t, path, init = {}) => callXero('https://api.xero.com/payroll.xro/2.0', t, path, init);
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function callXero(base, t, path, init = {}) {
-  const r = await fetch(base + path, {
-    ...init,
-    headers: { authorization: `Bearer ${t.access_token}`, 'xero-tenant-id': t.tenantId, accept: 'application/json', ...(init.headers || {}) }
-  });
+  // Xero allows 60 calls a minute per organisation. On 429, wait as asked (up to 4s) and try again, twice at most.
+  let r;
+  for (let tries = 0; ; tries++) {
+    r = await fetch(base + path, {
+      ...init,
+      headers: { authorization: `Bearer ${t.access_token}`, 'xero-tenant-id': t.tenantId, accept: 'application/json', ...(init.headers || {}) }
+    });
+    if (r.status !== 429 || tries >= 2) break;
+    const wait = Math.min(4, Math.max(1, parseFloat(r.headers.get('retry-after')) || 2));
+    await r.text().catch(() => {});
+    await sleep(wait * 1000 + Math.random() * 500);
+  }
   const text = await r.text();
   let body; try { body = JSON.parse(text); } catch { body = { raw: text }; }
   if (!r.ok) {
     const ve = body?.Elements?.[0]?.ValidationErrors?.map(e => e.Message).join('; ');
     const pe = body?.problem && (body.problem.detail || body.problem.title || (body.problem.invalidFields || []).map(f => f.reason).join('; '));
-    throw new Error(ve || pe || (r.status === 401 || r.status === 403 ? `Xero API error ${r.status} (not authorised)` : '') || body?.Detail || body?.Message || body?.Title || `Xero API error ${r.status}`);
+    throw new Error(ve || pe || (r.status === 401 || r.status === 403 ? `Xero API error ${r.status} (not authorised)` : r.status === 429 ? 'Xero API error 429 (too many requests, try again in a minute)' : '') || body?.Detail || body?.Message || body?.Title || `Xero API error ${r.status}`);
   }
   return body;
 }
