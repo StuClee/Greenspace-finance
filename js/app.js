@@ -184,7 +184,7 @@
     config: null, settings: null, data: null, view: 'dashboard', dayBase: {},
     tsDate: null, tsMonth: null, dashMonth: null, editing: null,
     inv: null, xero: { checked: false, available: false, connected: false }, charts: {}, pcharts: {}, saving: 0,
-    perf: { mode: 'months', cache: {}, data: null, loading: false, error: null, allLines: false },
+    perf: { mode: 'months', cache: {}, data: null, loading: false, error: null, allLines: false, payroll: { cache: {}, loading: false, error: null } },
     tax: { data: null, key: null, loading: false, error: null }
   };
 
@@ -730,6 +730,7 @@
       </div>
 
       ${wagesHTML(M, X)}
+      ${payrollHTML(X)}
 
       <div class="grid-2">
         <div class="panel">
@@ -761,6 +762,7 @@
 
     wirePerfHead(el);
     $$('[data-pnl-all]', el).forEach(b => b.onclick = () => { P.allLines = !P.allLines; renderPerformance(el); });
+    if ($('#payRetry')) $('#payRetry').onclick = () => { state.perf.payroll.error = null; route(); };
     drawPerfCharts(M, X);
   }
   function reconnectHTML(msg, back = 'performance') {
@@ -773,7 +775,7 @@
   }
   function wirePerfHead(el) {
     $$('[data-pmode]', el).forEach(b => b.onclick = () => { state.perf.mode = b.dataset.pmode; state.perf.error = null; renderPerformance(el); });
-    $('#pRefresh', el).onclick = () => { delete state.perf.cache[perfAsAt(state.perf.mode)]; loadPerf(true); route(); };
+    $('#pRefresh', el).onclick = () => { delete state.perf.cache[perfAsAt(state.perf.mode)]; state.perf.payroll = { cache: {}, loading: false, error: null }; loadPerf(true); route(); };
   }
 
   // ---------- wages ----------
@@ -837,6 +839,100 @@
     </div>`;
   }
 
+  // ---------- wages and PAYE by person (Xero payroll pay runs) ----------
+  const payKey = X => `${X.lyFyStart}:${X.asAt}`;
+  async function loadPayroll(X) {
+    const PR = state.perf.payroll, key = payKey(X);
+    PR.loading = true; PR.error = null;
+    try {
+      const r = await fetch(`/api/xero-payroll?from=${X.lyFyStart}&to=${X.asAt}`, { headers: { accept: 'application/json' } });
+      const ct = r.headers.get('content-type') || '';
+      if (!ct.includes('json')) throw new Error('The payroll split reads from Xero, which works once the app runs on Netlify.');
+      const j = await r.json();
+      if (!r.ok) throw Object.assign(new Error(j.error || 'Xero request failed (' + r.status + ')'), { needsReconnect: j.needsReconnect });
+      PR.cache[key] = j;
+    } catch (e) { PR.error = e; }
+    PR.loading = false;
+    if (state.view === 'performance') route();
+  }
+  // Stu first, then everyone else by name
+  const personOrder = p => (/^s(tu(art)?)?\b.*cameron/i.test(p.name) ? '0' : '1') + p.name.toLowerCase();
+  function payrollModel(J, X) {
+    const people = [...J.people].sort((a, b) => personOrder(a) < personOrder(b) ? -1 : 1);
+    const blank = () => ({ gross: 0, paye: 0, ksEmployee: 0, ksEmployer: 0, esct: 0, studentLoan: 0, toIrd: 0, net: 0, runs: 0 });
+    const add = (o, e) => { for (const k of Object.keys(o)) if (k !== 'runs') o[k] += e[k] || 0; o.runs++; };
+    const tot = { ty: {}, ly: {} };
+    people.forEach(p => { tot.ty[p.id] = blank(); tot.ly[p.id] = blank(); });
+    const fyMk = X.fyStart.slice(0, 7), n = Math.max(1, (X.nMonths || 1));
+    const months = Array.from({ length: n }, (_, i) => ({ mk: C.addMonths(fyMk, i), by: Object.fromEntries(people.map(p => [p.id, blank()])) }));
+    const mIdx = new Map(months.map((m, i) => [m.mk, i]));
+    for (const e of J.entries || []) {
+      if (e.date >= X.fyStart && e.date <= X.asAt) {
+        add(tot.ty[e.id], e);
+        const i = mIdx.get(e.date.slice(0, 7)); if (i != null) add(months[i].by[e.id], e);
+      } else if (e.date >= X.lyFyStart && e.date <= X.lyAsAt) add(tot.ly[e.id], e);
+    }
+    for (const m of months) {
+      const v = Object.values(m.by);
+      m.paye = v.reduce((a, o) => a + o.paye + o.studentLoan, 0);
+      m.ks = v.reduce((a, o) => a + o.ksEmployee + o.ksEmployer, 0);
+      m.toIrd = v.reduce((a, o) => a + o.toIrd, 0);
+      m.ird = TAX_IRD.paye[m.mk] || null;
+    }
+    // Only people paid in either period
+    const shown = people.filter(p => tot.ty[p.id].runs || tot.ly[p.id].runs);
+    return { people: shown, tot, months };
+  }
+  function payrollHTML(X) {
+    const PR = state.perf.payroll, key = payKey(X), J = PR.cache[key];
+    if (!J && !PR.loading && !PR.error) { PR.loading = true; setTimeout(() => loadPayroll(X)); }
+    const head = `<div class="panel-head"><h2>Wages and PAYE by person</h2><span class="note">From posted Xero pay runs, by payment date</span></div>`;
+    if (!J) {
+      const e = PR.error;
+      if (!e) return `<div class="panel">${head}<p class="muted">Getting the pay runs from Xero ...</p></div>`;
+      if (e.needsReconnect) return `<div class="panel">${head}
+        <p>Wages for everyone go into the one Wages &amp; Salaries account in Xero, so the split by person comes from the payroll payslips. That needs read-only access to Xero payroll pay runs and payslips. Reconnect once and allow it when Xero asks.</p>
+        <p><a class="btn" href="/api/xero-connect?back=performance&payroll=1">Allow payroll access</a></p>
+        <p class="note">Xero said: ${esc(e.message)}</p></div>`;
+      return `<div class="panel">${head}<div class="callout">Could not get the pay runs from Xero: ${esc(e.message)} <button class="btn btn-small btn-quiet" id="payRetry">Try again</button></div></div>`;
+    }
+    const P = payrollModel(J, X), { people, tot, months } = P;
+    if (!people.length) return `<div class="panel">${head}<p class="muted">No posted pay runs in Xero for this year or the same period last year.</p></div>`;
+    const rate = o => o.gross ? pctTxt(o.paye / o.gross) : '-';
+    const cards = people.map(p => {
+      const a = tot.ty[p.id], b = tot.ly[p.id];
+      return `${kpi(`${esc(p.name)}: gross pay`, a.gross, b.gross, { good: null, sub: `${a.runs} pay run${a.runs === 1 ? '' : 's'} this year (last year ${b.runs})` })}
+        ${kpi(`${esc(p.name)}: PAYE`, a.paye + a.studentLoan, b.paye + b.studentLoan, { good: null, sub: `${rate(a)} of gross (last year ${rate(b)}) · incl ACC levy${a.studentLoan ? ' and student loan' : ''}` })}`;
+    }).join('');
+    const cols = people.map(p => `<th class="num">${esc(p.name)}<div class="note">gross</div></th><th class="num">${esc(p.name)}<div class="note">PAYE</div></th>`).join('');
+    const cell = (o, k) => o.runs ? money(k === 'paye' ? o.paye + o.studentLoan : o[k]) : '<span class="muted">-</span>';
+    const check = m => {
+      if (!m.ird) return '<span class="muted">-</span>';
+      const d = Math.abs(m.ird.total - m.toIrd) <= 1 && Math.abs(m.ird.paye - m.paye) <= 1;
+      return d ? `<span class="chip ok" title="myIR: PAYE ${money(m.ird.paye)}, total ${money(m.ird.total)}">Matches</span>`
+        : `<span class="chip warn" title="myIR: PAYE ${money(m.ird.paye)}, total ${money(m.ird.total)}">myIR ${money(m.ird.total)}</span>`;
+    };
+    const rows = months.map(m => `<tr${m.toIrd ? '' : ' class="muted-row"'}><td>${C.monthLabel(m.mk)}</td>
+      ${people.map(p => `<td class="num">${cell(m.by[p.id], 'gross')}</td><td class="num">${cell(m.by[p.id], 'paye')}</td>`).join('')}
+      <td class="num">${m.ks ? money(m.ks) : '<span class="muted">-</span>'}</td><td class="num">${m.toIrd ? money(m.toIrd) : '<span class="muted">-</span>'}</td><td>${check(m)}</td></tr>`).join('');
+    const sumT = (k) => people.reduce((a, p) => a + tot.ty[p.id][k], 0);
+    const foot = `<tr><td>Year to date</td>${people.map(p => `<td class="num">${money0(tot.ty[p.id].gross)}</td><td class="num">${money0(tot.ty[p.id].paye + tot.ty[p.id].studentLoan)}</td>`).join('')}
+      <td class="num">${money0(sumT('ksEmployee') + sumT('ksEmployer'))}</td><td class="num">${money0(sumT('toIrd'))}</td><td></td></tr>
+      <tr class="muted-row"><td>Last year, same point</td>${people.map(p => `<td class="num">${money0(tot.ly[p.id].gross)}</td><td class="num">${money0(tot.ly[p.id].paye + tot.ly[p.id].studentLoan)}</td>`).join('')}
+      <td class="num">${money0(people.reduce((a, p) => a + tot.ly[p.id].ksEmployee + tot.ly[p.id].ksEmployer, 0))}</td><td class="num">${money0(people.reduce((a, p) => a + tot.ly[p.id].toIrd, 0))}</td><td></td></tr>`;
+    const ks = people.map(p => { const a = tot.ty[p.id]; return a.ksEmployee || a.ksEmployer ? `${esc(p.name)} ${money0(a.ksEmployee)} employee + ${money0(a.ksEmployer)} employer${a.esct ? ` (incl ${money0(a.esct)} ESCT)` : ''}` : ''; }).filter(Boolean);
+    return `<div class="panel wages">${head}
+      <div class="kpis kpis-quiet">${cards}</div>
+      ${J.errors?.length ? `<div class="callout">Some pay runs could not be read: ${J.errors.map(esc).join('; ')}</div>` : ''}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Pay month</th>${cols}<th class="num">KiwiSaver<div class="note">employee + employer</div></th><th class="num">Total to IRD</th><th>myIR filed</th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot>${foot}</tfoot>
+      </table></div>
+      <p class="note">PAYE includes the ACC earner levy${people.some(p => tot.ty[p.id].studentLoan) ? ' and student loan deductions' : ''}. Total to IRD = PAYE + KiwiSaver both sides, as filed in the employment information return. ${ks.length ? 'KiwiSaver this year: ' + ks.join('; ') + '. ' : ''}myIR filed is the snapshot read from myIR on 15 Nov 2026.</p>
+    </div>`;
+  }
+
   // ---------- profit and loss table ----------
   function pnlTableHTML(M) {
     const { L, ty, ly } = M;
@@ -849,7 +945,9 @@
     let exp = group('expenses');
     const threshold = Math.max(rev, lrev) * 0.01;
     let hidden = [];
-    if (!P.allLines) { hidden = exp.filter(l => Math.abs(l.ty) < threshold && Math.abs(l.ly) < threshold); exp = exp.filter(l => !hidden.includes(l)); }
+    // Lines that always get their own row, however small
+    const keep = l => /^accounting\b/i.test(l.name);
+    if (!P.allLines) { hidden = exp.filter(l => !keep(l) && Math.abs(l.ty) < threshold && Math.abs(l.ly) < threshold); exp = exp.filter(l => !hidden.includes(l)); }
     const hid = hidden.reduce((a, l) => ({ ty: a.ty + l.ty, ly: a.ly + l.ly }), { ty: 0, ly: 0 });
     return `<div class="panel">
       <div class="panel-head"><h2>Profit and loss against last year</h2>
