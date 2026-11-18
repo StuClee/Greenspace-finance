@@ -4,11 +4,15 @@ const page = (msg, ok, back = 'invoicing', extra = '') => new Response(`<!DOCTYP
 export default async (req) => {
   if (!configured()) return page('Xero keys are not set on Netlify.', false);
   const u = new URL(req.url);
-  const [back = 'invoicing', variant = 'granular'] = ((req.headers.get('cookie') || '').match(/xero_back=([a-z.]+)/)?.[1] || '').split('.').filter(Boolean);
+  const [back = 'invoicing', variant = 'granular', pay = ''] = ((req.headers.get('cookie') || '').match(/xero_back=([a-z.]+)/)?.[1] || '').split('.').filter(Boolean);
   const err = u.searchParams.get('error');
   if (err) {
     // If Xero refuses the newer report permissions, offer the older one (works for apps created before March 2026)
-    const retry = /scope/i.test(err) && variant !== 'legacy' ? `<p>This can happen if the Xero app uses the older permission names. <a href="/api/xero-connect?back=${back}&reports=legacy">Try again with the older report permission</a>.</p>` : '';
+    const v = variant === 'legacy' ? '&reports=legacy' : '';
+    const retry = !/scope/i.test(err) ? '' : [
+      variant !== 'legacy' ? `<p>This can happen if the Xero app uses the older permission names. <a href="/api/xero-connect?back=${back}&reports=legacy${pay ? '&payroll=1' : ''}">Try again with the older report permission</a>.</p>` : '',
+      pay ? `<p>If Xero will not allow payroll access, <a href="/api/xero-connect?back=${back}${v}&payroll=0">connect without payroll</a>. Everything works except the wages and PAYE split by person.</p>` : ''
+    ].join('');
     return page('Xero said: ' + err, false, back, retry);
   }
   const cookie = (req.headers.get('cookie') || '').match(/xero_state=([^;]+)/)?.[1];

@@ -5,12 +5,17 @@ export const env = k => (globalThis.Netlify?.env?.get(k)) ?? process.env[k];
 const BASE_SCOPES = 'openid profile email offline_access accounting.transactions accounting.contacts.read accounting.attachments';
 // Report scopes for the Performance page. Granular names by default; ?reports=legacy (or XERO_REPORT_SCOPES) uses the older broad scope.
 export const REPORT_SCOPES = { granular: 'accounting.reports.profitandloss.read accounting.reports.balancesheet.read', legacy: 'accounting.reports.read' };
-export const SCOPES = (variant = 'granular') => {
+// Payroll scopes (read only) for the wages and PAYE split by person. XERO_PAYROLL_SCOPES=none leaves them out.
+export const PAYROLL_SCOPES = 'payroll.payruns.read payroll.payslip.read';
+export const SCOPES = (variant = 'granular', payroll = true) => {
   const base = (env('XERO_SCOPES') || BASE_SCOPES).split(/\s+/).filter(Boolean);
   const extra = (env('XERO_REPORT_SCOPES') || REPORT_SCOPES[variant] || REPORT_SCOPES.granular).split(/\s+/);
-  return [...new Set([...base, ...extra])].join(' ');
+  const ps = env('XERO_PAYROLL_SCOPES') || PAYROLL_SCOPES;
+  const pay = payroll && ps !== 'none' ? ps.split(/\s+/) : [];
+  return [...new Set([...base, ...extra, ...pay])].filter(Boolean).join(' ');
 };
 export const hasReportScopes = scope => !scope ? null : /accounting\.reports\.read|accounting\.reports\.profitandloss\.read/.test(scope);
+export const hasPayrollScopes = scope => !scope ? null : /payroll\.payruns(\.read)?\b/.test(scope) && /payroll\.payslip(\.read)?\b/.test(scope);
 export const redirectUri = req => env('XERO_REDIRECT_URI') || new URL('/api/xero-callback', req.url).toString();
 export const configured = () => !!(env('XERO_CLIENT_ID') && env('XERO_CLIENT_SECRET'));
 const store = () => getStore('xero');
@@ -44,8 +49,12 @@ export async function session() {
   return next;
 }
 
-export async function xeroApi(t, path, init = {}) {
-  const r = await fetch('https://api.xero.com/api.xro/2.0' + path, {
+export const xeroApi = (t, path, init = {}) => callXero('https://api.xero.com/api.xro/2.0', t, path, init);
+// NZ Payroll API (v2): camelCase JSON, errors in body.problem
+export const payrollApi = (t, path, init = {}) => callXero('https://api.xero.com/payroll.xro/2.0', t, path, init);
+
+async function callXero(base, t, path, init = {}) {
+  const r = await fetch(base + path, {
     ...init,
     headers: { authorization: `Bearer ${t.access_token}`, 'xero-tenant-id': t.tenantId, accept: 'application/json', ...(init.headers || {}) }
   });
@@ -53,7 +62,8 @@ export async function xeroApi(t, path, init = {}) {
   let body; try { body = JSON.parse(text); } catch { body = { raw: text }; }
   if (!r.ok) {
     const ve = body?.Elements?.[0]?.ValidationErrors?.map(e => e.Message).join('; ');
-    throw new Error(ve || body?.Detail || body?.Message || body?.Title || `Xero API error ${r.status}`);
+    const pe = body?.problem && (body.problem.detail || body.problem.title || (body.problem.invalidFields || []).map(f => f.reason).join('; '));
+    throw new Error(ve || pe || (r.status === 401 || r.status === 403 ? `Xero API error ${r.status} (not authorised)` : '') || body?.Detail || body?.Message || body?.Title || `Xero API error ${r.status}`);
   }
   return body;
 }
