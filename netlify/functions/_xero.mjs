@@ -11,7 +11,10 @@ export const REPORT_SCOPES = { granular: 'accounting.reports.profitandloss.read 
 // Payroll scopes (read only) for the wages and PAYE split by person. XERO_PAYROLL_SCOPES=none leaves them out.
 export const PAYROLL_SCOPES = 'payroll.payruns.read payroll.payslip.read';
 export const SCOPES = (variant = 'granular', payroll = true, tx = 'granular') => {
-  const base = (env('XERO_SCOPES') || BASE_SCOPES + ' ' + (TX_SCOPES[tx] || TX_SCOPES.granular)).split(/\s+/).filter(Boolean);
+  // The XERO_SCOPES setting on Netlify (set before Xero's granular scopes) replaces the base list only;
+  // the invoice, payment and bank transaction scopes are always added, and the old broad scope dropped unless tx=broad.
+  const txs = (TX_SCOPES[tx] || TX_SCOPES.granular).split(/\s+/);
+  const base = (env('XERO_SCOPES') || BASE_SCOPES).split(/\s+/).filter(Boolean).filter(x => tx === 'broad' || !/^accounting\.transactions(\.read)?$/.test(x)).concat(txs);
   const extra = (env('XERO_REPORT_SCOPES') || REPORT_SCOPES[variant] || REPORT_SCOPES.granular).split(/\s+/);
   const ps = env('XERO_PAYROLL_SCOPES') || PAYROLL_SCOPES;
   const pay = payroll && ps !== 'none' ? ps.split(/\s+/) : [];
