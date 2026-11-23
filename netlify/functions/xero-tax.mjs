@@ -142,7 +142,7 @@ export default async (req) => {
     const bankTx = async () => {
       const out = [];
       for (let page = 1; page <= 20; page++) {
-        const b = await xeroApi(t, `/BankTransactions?where=${encodeURIComponent(`Date>=${fmtDT(earliest)} AND Date<=${fmtDT(today)} AND Status=="AUTHORISED"`)}&page=${page}`);
+        const b = await xeroApi(t, `/BankTransactions?where=${encodeURIComponent(`Date>=${fmtDT(earliest)} AND Date<=${fmtDT(today)} AND Status=="AUTHORISED"`)}&order=Date%20DESC&pageSize=1000&page=${page}`);
         const list = b.BankTransactions || [];
         out.push(...list);
         if (list.length < 100) break;
