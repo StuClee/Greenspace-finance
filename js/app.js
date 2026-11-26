@@ -375,6 +375,7 @@
   // DASHBOARD
   // ======================================================================
   function renderDashboard(el) {
+    seedPayables();
     const d = state.data;
     const months = allMonths();
     const t = todayISO();
@@ -495,6 +496,24 @@
       const u = Object.assign({}, state.settings.xeroUnmatch); delete u[a.dataset.rematch];
       state.settings.xeroUnmatch = u; saveSettings(); renderDashboard(el);
     });
+    // accounts payable
+    $('#apAddBtn')?.addEventListener('click', () => { state.apAdd = !state.apAdd; renderDashboard(el); if (state.apAdd) $('#apSupplier')?.focus(); });
+    $('#apForm')?.addEventListener('submit', e => {
+      e.preventDefault();
+      const total = parseFloat($('#apTotal').value);
+      const b = { id: C.uid(), supplier: $('#apSupplier').value.trim(), number: $('#apNumber').value.trim(), date: $('#apDate').value, dueDate: $('#apDue').value, total: isFinite(total) ? C.round2(total) : 0, note: $('#apNote').value.trim() };
+      if (!b.supplier || !b.number || !b.dueDate) { toast('Enter the supplier, invoice number and due date.'); return; }
+      state.settings.payables = state.settings.payables || []; state.settings.payables.push(b);
+      state.apAdd = false; saveSettings(); renderDashboard(el); toast('Bill added');
+    });
+    $$('[data-appaid]', el).forEach(btn => btn.onclick = () => {
+      const b = (state.settings.payables || []).find(x => x.id === btn.dataset.appaid); if (!b) return;
+      b.paid = todayISO(); saveSettings(); renderDashboard(el); toast(`${b.supplier} ${b.number} marked paid`);
+    });
+    $$('[data-apdel]', el).forEach(btn => btn.onclick = () => {
+      if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Confirm'; setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.innerHTML = '&times;'; } }, 4000); return; }
+      state.settings.payables = (state.settings.payables || []).filter(x => x.id !== btn.dataset.apdel); saveSettings(); renderDashboard(el); toast('Bill deleted');
+    });
     // manual items on the not-invoiced list
     $('#niAddBtn')?.addEventListener('click', () => { state.niAdd = !state.niAdd; renderDashboard(el); if (state.niAdd) $('#niContact')?.focus(); });
     $('#niCancel')?.addEventListener('click', () => { state.niAdd = false; renderDashboard(el); });
@@ -591,6 +610,47 @@
     </table></div>`;
   }
 
+  // ----- Accounts payable: supplier invoices to pay (settings.payables) -----
+  // Seeded once from the PDFs in Greenspace Consulting\Invoices\Supplier (read 26 Nov 2026); after that, edit in the app.
+  const AP_SEED = [
+    { supplier: 'Ardmore Nurseries Ltd', number: 'INV/2026/4862', date: '2026-11-20', dueDate: '2026-11-20', excl: 1812.50, total: 2084.38, note: 'Pittosporum crassifolium 8L x 97 + Ardmore Truck (order Karo)', file: 'Ardmore INV_2026_4862.pdf', bank: '02-0358-0071815-00', payRef: 'INV/2026/4862 GREECON' },
+    { supplier: 'Baker Boys Wholesale Nurserymen Ltd', number: 'INV-26862', date: '2026-10-20', dueDate: '2026-11-20', excl: 1600.00, total: 1840.00, note: 'Cycas revoluta 17L x2, 35L x3; Rhopalostylis 80L x2; freight (10 Rarere Terrace, Hauraki)', file: 'Baker Invoice INV-26862.pdf', bank: '03-0351-0048153-00', payRef: 'INV-26862' }
+  ];
+  function seedPayables() {
+    const s = state.settings; s.payables = s.payables || []; s.apSeen = s.apSeen || [];
+    let added = false;
+    for (const b of AP_SEED) if (!s.apSeen.includes(b.number)) { s.apSeen.push(b.number); if (!s.payables.some(x => x.number === b.number && x.supplier === b.supplier)) s.payables.push({ id: C.uid(), ...b }); added = true; }
+    if (added) saveSettings();
+  }
+  function payablesHTML() {
+    const list = (state.settings.payables || []).filter(b => !b.paid).sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
+    const t = todayISO(), days = d => Math.round((Date.parse(t) - Date.parse(d)) / 86400000);
+    const head = `<div class="panel-head" style="margin-top:22px"><h2>Accounts payable</h2><button class="btn btn-small btn-quiet" id="apAddBtn" type="button">${state.apAdd ? 'Close' : '+ Add bill'}</button></div>`;
+    const form = state.apAdd ? `<form id="apForm" class="no-print" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 14px;padding:10px;border:1px solid var(--line);border-radius:8px">
+        <label class="field" style="grid-column:1/-1"><span>Supplier</span><input type="text" id="apSupplier" required></label>
+        <label class="field"><span>Invoice number</span><input type="text" id="apNumber" required></label>
+        <label class="field"><span>Amount incl GST</span><input type="number" id="apTotal" step="0.01" required></label>
+        <label class="field"><span>Invoice date</span><input type="date" id="apDate" value="${t}"></label>
+        <label class="field"><span>Due date</span><input type="date" id="apDue" value="${t}" required></label>
+        <label class="field" style="grid-column:1/-1"><span>Note (optional)</span><input type="text" id="apNote"></label>
+        <div><button class="btn btn-small" type="submit">Add</button></div>
+      </form>` : '';
+    if (!list.length) return head + form + '<p class="muted">No supplier invoices waiting to be paid.</p>';
+    const tot = list.reduce((a, b) => a + (+b.total || 0), 0), over = list.filter(b => b.dueDate && days(b.dueDate) > 0).reduce((a, b) => a + (+b.total || 0), 0);
+    return head + form + `<div class="table-wrap"><table>
+      <thead><tr><th>Supplier</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th><th></th></tr></thead>
+      <tbody>${list.map(b => { const d = b.dueDate ? days(b.dueDate) : null; return `<tr>
+        <td>${esc(b.supplier)}${b.note ? `<div class="muted" style="font-size:.75rem">${esc(b.note)}</div>` : ''}${b.bank ? `<div class="muted mono" style="font-size:.72rem">Pay ${esc(b.bank)}${b.payRef ? ' · ref ' + esc(b.payRef) : ''}</div>` : ''}</td>
+        <td style="white-space:nowrap">${esc(b.number)}${b.date ? `<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(b.date)}</div>` : ''}</td>
+        <td style="white-space:nowrap">${b.dueDate ? C.fmtDateNZ(b.dueDate) : '-'}</td>
+        <td class="num">${money(+b.total || 0)}</td>
+        <td class="num">${d === null ? '' : d > 0 ? `<span style="color:#b3412f;font-weight:600">${d}</span>` : d === 0 ? 'Due today' : `<span class="muted">due in ${-d}</span>`}</td>
+        <td style="white-space:nowrap"><button class="btn btn-small btn-quiet" data-appaid="${esc(b.id)}" title="Record that this has been paid">Paid</button>
+          <button class="btn btn-small btn-danger" data-apdel="${esc(b.id)}" title="Delete this bill">&times;</button></td></tr>`; }).join('')}</tbody>
+      <tfoot><tr><td colspan="3">Total to pay (incl GST)${over ? `<div class="muted" style="font-size:.75rem;font-weight:400">Overdue ${money(over)}</div>` : ''}</td><td class="num">${money(tot)}</td><td colspan="2"></td></tr></tfoot>
+    </table></div>`;
+  }
+
   // Months before the current one that can still hold uninvoiced work (from the app's start date)
   function nonCurrentMonths(curMk) {
     const from = C.monthKey(state.settings.fromDate || '2026-09-01');
@@ -640,7 +700,7 @@
         <div style="display:flex;gap:8px;align-items:flex-end"><button class="btn btn-small" type="submit">Add</button><button class="btn btn-small btn-quiet" type="button" id="niCancel">Cancel</button></div>
       </form>` : '';
     const addBtn = `<div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn btn-small btn-quiet" id="niAddBtn" type="button">${state.niAdd ? 'Close' : '+ Add item'}</button></div>`;
-    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn + matchedHTML + unpaidHTML();
+    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn + matchedHTML + unpaidHTML() + payablesHTML();
     const tH = list.reduce((a, c) => a + c.hours, 0), tA = list.reduce((a, c) => a + c.amt, 0);
     const rowHTML = r => r.item ? `<tr>
             <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
@@ -657,7 +717,7 @@
         <thead><tr><th>Customer / month</th><th>Work</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
         <tbody>${list.map(c => `<tr style="background:var(--paper-2, rgba(0,0,0,.03))"><td colspan="2"><strong>${esc(c.contact)}</strong></td><td class="num"><strong>${hrs(c.hours)}</strong></td><td class="num"><strong>${money(c.amt)}</strong></td><td></td></tr>${c.rows.map(rowHTML).join('')}`).join('')}</tbody>
         <tfoot><tr><td colspan="2">Total not invoiced</td><td class="num">${hrs(tH)}</td><td class="num">${money(tA)}</td><td></td></tr></tfoot>
-      </table></div>` + addBtn + matchedHTML + unpaidHTML();
+      </table></div>` + addBtn + matchedHTML + unpaidHTML() + payablesHTML();
   }
 
   function drawDashboardCharts(s, months, isCurrent) {
