@@ -375,7 +375,6 @@
   // DASHBOARD
   // ======================================================================
   function renderDashboard(el) {
-    loadPayableSeeds(() => renderDashboard(el));
     const d = state.data;
     const months = allMonths();
     const t = todayISO();
@@ -496,29 +495,6 @@
       const u = Object.assign({}, state.settings.xeroUnmatch); delete u[a.dataset.rematch];
       state.settings.xeroUnmatch = u; saveSettings(); renderDashboard(el);
     });
-    // accounts payable
-    $('#apAddBtn')?.addEventListener('click', () => { state.apAdd = !state.apAdd; renderDashboard(el); if (state.apAdd) $('#apSupplier')?.focus(); });
-    $('#apForm')?.addEventListener('submit', e => {
-      e.preventDefault();
-      const total = parseFloat($('#apTotal').value);
-      const b = { id: C.uid(), supplier: $('#apSupplier').value.trim(), number: $('#apNumber').value.trim(), date: $('#apDate').value, dueDate: $('#apDue').value, total: isFinite(total) ? C.round2(total) : 0 };
-      if (!b.supplier || !b.number || !b.dueDate) { toast('Enter the supplier, invoice number and due date.'); return; }
-      state.settings.payables = state.settings.payables || []; state.settings.payables.push(b);
-      state.apAdd = false; saveSettings(); renderDashboard(el); toast('Bill added');
-    });
-    $$('[data-appaid]', el).forEach(btn => btn.onclick = () => {
-      const b = (state.settings.payables || []).find(x => x.id === btn.dataset.appaid); if (!b) return;
-      b.paid = todayISO(); saveSettings(); renderDashboard(el); toast(`${b.supplier} ${b.number} marked paid`);
-    });
-    $('#apPaid')?.addEventListener('toggle', e => { state.apShowPaid = e.target.open; });
-    $$('[data-apunpaid]', el).forEach(btn => btn.onclick = () => {
-      const b = (state.settings.payables || []).find(x => x.id === btn.dataset.apunpaid); if (!b) return;
-      delete b.paid; saveSettings(); renderDashboard(el); toast(`${b.supplier} ${b.number} is back on the list to pay`);
-    });
-    $$('[data-apdel]', el).forEach(btn => btn.onclick = () => {
-      if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Confirm'; setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.innerHTML = '&times;'; } }, 4000); return; }
-      state.settings.payables = (state.settings.payables || []).filter(x => x.id !== btn.dataset.apdel); saveSettings(); renderDashboard(el); toast('Bill deleted');
-    });
     // manual items on the not-invoiced list
     $('#niAddBtn')?.addEventListener('click', () => { state.niAdd = !state.niAdd; renderDashboard(el); if (state.niAdd) $('#niContact')?.focus(); });
     $('#niCancel')?.addEventListener('click', () => { state.niAdd = false; renderDashboard(el); });
@@ -586,10 +562,15 @@
     state.niXero = Object.assign({}, x, { loading: true });
     try {
       const from = C.monthStart(C.monthKey(state.settings.fromDate || '2026-09-01')), to = todayISO();
-      const r = await fetch(`/api/xero-numbers?from=${from}&to=${to}&unpaid=1`, { headers: { accept: 'application/json' } });
+      const [r, rb] = await Promise.all([
+        fetch(`/api/xero-numbers?from=${from}&to=${to}&unpaid=1`, { headers: { accept: 'application/json' } }),
+        fetch('/api/xero-bills', { headers: { accept: 'application/json' } }).catch(() => null)
+      ]);
       const j = await r.json().catch(() => ({}));
       if (!r.ok || j.error) throw new Error(j.error || 'Xero ' + r.status);
-      state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED'), unpaid: j.unpaid || null };
+      const jb = rb ? await rb.json().catch(() => null) : null;
+      state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED'), unpaid: j.unpaid || null,
+        bills: jb && Array.isArray(jb.bills) ? jb.bills : null, billsError: jb && jb.error ? jb.error : (rb && !rb.ok && !jb ? 'Xero bills ' + rb.status : null) };
     } catch (e) { state.niXero = { at: Date.now(), error: e.message }; }
     const ws = [...niWaiters]; niWaiters.clear(); ws.forEach(f => { try { f(); } catch (e) { console.warn(e); } });
   }
@@ -619,59 +600,29 @@
   }
 
   // ----- Accounts payable: supplier invoices to pay (settings.payables) -----
-  // Bills come from js/payables.json (kept up to date from the PDFs in Greenspace Consulting\Invoices\Supplier).
-  // Each bill is added once, by supplier + invoice number; after that, Paid / delete in the app are kept.
-  let apSeedsLoaded = false;
-  async function loadPayableSeeds(redraw) {
-    if (apSeedsLoaded) return; apSeedsLoaded = true;
-    try {
-      const r = await fetch('js/payables.json', { cache: 'no-store' });
-      if (!r.ok) return;
-      const list = await r.json();
-      const s = state.settings; s.payables = s.payables || []; s.apSeen = s.apSeen || [];
-      let added = 0;
-      for (const b of Array.isArray(list) ? list : []) {
-        if (!b || !b.number || !b.supplier) continue;
-        const key = b.supplier + '|' + b.number;
-        if (s.apSeen.includes(key) || s.apSeen.includes(b.number)) continue;
-        s.apSeen.push(key);
-        if (!s.payables.some(x => x.number === b.number && x.supplier === b.supplier)) { s.payables.push({ id: C.uid(), supplier: b.supplier, number: b.number, date: b.date || '', dueDate: b.dueDate || '', total: +b.total || 0, excl: +b.excl || 0, bank: b.bank || '', payRef: b.payRef || '', file: b.file || '' }); added++; }
-      }
-      if (added) { saveSettings(); if (redraw && state.view === 'dashboard') redraw(); }
-    } catch { /* no payables file yet */ }
-  }
+  // Accounts payable: unpaid supplier bills read from Xero (/api/xero-bills)
   function payablesHTML() {
-    const list = (state.settings.payables || []).filter(b => !b.paid).sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
-    const paid = (state.settings.payables || []).filter(b => b.paid).sort((a, b) => String(b.paid).localeCompare(String(a.paid)));
-    const paidHTML = paid.length ? `<details class="no-print" style="margin-top:10px"${state.apShowPaid ? ' open' : ''} id="apPaid"><summary class="note" style="cursor:pointer">Paid bills (${paid.length})</summary>
-      <div class="table-wrap"><table><thead><tr><th>Supplier</th><th>Invoice</th><th class="num">Amount</th><th>Marked paid</th><th></th></tr></thead>
-      <tbody>${paid.map(b => `<tr><td>${esc(b.supplier)}</td><td>${esc(b.number)}</td><td class="num">${money(+b.total || 0)}</td><td>${typeof b.paid === 'string' && /^\d{4}-/.test(b.paid) ? C.fmtDateNZ(b.paid) : ''}</td>
-        <td><button class="btn btn-small btn-quiet" data-apunpaid="${esc(b.id)}" title="Put this bill back on the list to pay">Undo</button></td></tr>`).join('')}</tbody></table></div></details>` : '';
+    const xs = state.niXero || {};
+    const head = '<div class="panel-head" style="margin-top:22px"><h2>Accounts payable</h2><span class="note">Bills in Xero</span></div>';
+    if (xs.loading && !xs.invoices) return head + '<p class="note">Checking Xero...</p>';
+    if (xs.billsError) return head + `<p class="note">Could not read bills from Xero (${esc(xs.billsError)}).</p>`;
+    if (!xs.bills) return head + '<p class="note">Upload the xero-bills function to see supplier bills here.</p>';
+    if (!xs.bills.length) return head + '<p class="muted">No supplier bills waiting to be paid in Xero.</p>';
     const t = todayISO(), days = d => Math.round((Date.parse(t) - Date.parse(d)) / 86400000);
-    const head = `<div class="panel-head" style="margin-top:22px"><h2>Accounts payable</h2><button class="btn btn-small btn-quiet" id="apAddBtn" type="button">${state.apAdd ? 'Close' : '+ Add bill'}</button></div>`;
-    const form = state.apAdd ? `<form id="apForm" class="no-print" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 14px;padding:10px;border:1px solid var(--line);border-radius:8px">
-        <label class="field" style="grid-column:1/-1"><span>Supplier</span><input type="text" id="apSupplier" required></label>
-        <label class="field"><span>Invoice number</span><input type="text" id="apNumber" required></label>
-        <label class="field"><span>Amount incl GST</span><input type="number" id="apTotal" step="0.01" required></label>
-        <label class="field"><span>Invoice date</span><input type="date" id="apDate" value="${t}"></label>
-        <label class="field"><span>Due date</span><input type="date" id="apDue" value="${t}" required></label>
-        <div><button class="btn btn-small" type="submit">Add</button></div>
-      </form>` : '';
-    if (!list.length) return head + form + '<p class="muted">No supplier invoices waiting to be paid.</p>' + paidHTML;
-    const tot = list.reduce((a, b) => a + (+b.total || 0), 0), over = list.filter(b => b.dueDate && days(b.dueDate) > 0).reduce((a, b) => a + (+b.total || 0), 0);
-    return head + form + `<div class="table-wrap"><table>
-      <thead><tr><th>Supplier</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th><th></th></tr></thead>
-      <tbody>${list.map(b => { const d = b.dueDate ? days(b.dueDate) : null; return `<tr>
-        <td>${esc(b.supplier)}${b.bank ? `<div class="muted mono" style="font-size:.72rem">Pay ${esc(b.bank)}${b.payRef ? ' · ref ' + esc(b.payRef) : ''}</div>` : ''}</td>
+    const tot = xs.bills.reduce((a, b) => a + (+b.amountDue || 0), 0), over = xs.bills.filter(b => b.dueDate && days(b.dueDate) > 0).reduce((a, b) => a + (+b.amountDue || 0), 0);
+    return head + `<div class="table-wrap"><table>
+      <thead><tr><th>Supplier</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th></tr></thead>
+      <tbody>${xs.bills.map(b => { const d = b.dueDate ? days(b.dueDate) : null; return `<tr>
+        <td><a href="https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${esc(b.invoiceId)}" target="_blank" rel="noopener">${esc(b.contactName)}</a>${b.status === 'DRAFT' || b.status === 'SUBMITTED' ? ' <span class="chip warn" style="font-size:.7rem">Not approved</span>' : ''}</td>
         <td style="white-space:nowrap">${esc(b.number)}${b.date ? `<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(b.date)}</div>` : ''}</td>
         <td style="white-space:nowrap">${b.dueDate ? C.fmtDateNZ(b.dueDate) : '-'}</td>
-        <td class="num">${money(+b.total || 0)}</td>
-        <td class="num">${d === null ? '' : d > 0 ? `<span style="color:#b3412f;font-weight:600">${d}</span>` : d === 0 ? 'Due today' : `<span class="muted">due in ${-d}</span>`}</td>
-        <td style="white-space:nowrap"><button class="btn btn-small btn-quiet" data-appaid="${esc(b.id)}" title="Record that this has been paid">Paid</button>
-          <button class="btn btn-small btn-danger" data-apdel="${esc(b.id)}" title="Delete this bill">&times;</button></td></tr>`; }).join('')}</tbody>
-      <tfoot><tr><td colspan="3">Total to pay (incl GST)${over ? `<div class="muted" style="font-size:.75rem;font-weight:400">Overdue ${money(over)}</div>` : ''}</td><td class="num">${money(tot)}</td><td colspan="2"></td></tr></tfoot>
-    </table></div>` + paidHTML;
+        <td class="num">${money(+b.amountDue || 0)}${+b.amountDue < +b.total ? `<div class="muted" style="font-size:.75rem">of ${money(+b.total)}</div>` : ''}</td>
+        <td class="num">${d === null ? '' : d > 0 ? `<span style="color:#b3412f;font-weight:600">${d}</span>` : d === 0 ? 'Due today' : `<span class="muted">due in ${-d}</span>`}</td></tr>`; }).join('')}</tbody>
+      <tfoot><tr><td colspan="3">Total to pay (incl GST)${over ? `<div class="muted" style="font-size:.75rem;font-weight:400">Overdue ${money(over)}</div>` : ''}</td><td class="num">${money(tot)}</td><td></td></tr></tfoot>
+    </table></div>
+    <p class="note">Pay these in Xero against the bill (or match the bank line to the bill), not as Spend Money, so they come off this list.</p>`;
   }
+
 
   // Months before the current one that can still hold uninvoiced work (from the app's start date)
   function nonCurrentMonths(curMk) {
@@ -1091,8 +1042,8 @@
       }
     }
     // ----- payments
-    line('suppliers', 'Suppliers (accounts payable)', 'out', 'Unpaid bills on the Dashboard, on their due date (overdue ones this week)');
-    for (const b of state.settings.payables || []) if (!b.paid) put('suppliers', b.dueDate || today, +b.total || 0, `${b.supplier} ${b.number}`);
+    line('suppliers', 'Suppliers (accounts payable)', 'out', 'Unpaid supplier bills in Xero, on their due date (overdue ones this week)');
+    for (const b of xs.bills || []) put('suppliers', b.dueDate || today, +b.amountDue || 0, `${b.contactName} ${b.number}`);
     const dr = cf.drawings;
     line('drRent', 'Drawings: rent (Fridays)', 'out', `Rent ${money(+dr.rent || 0)} every Friday`);
     line('drDaily', 'Drawings: allowance and fuel', 'out', `Personal allowance ${money(+dr.allowance || 0)} a day, fuel ${money(+dr.fuel || 0)} a week (Fridays)`);
