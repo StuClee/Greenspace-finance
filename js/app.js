@@ -466,7 +466,7 @@
               <td><span class="cat-dot" style="background:${CAT_COLORS[c]}"></span>${c}</td><td class="num">${hrs(s.categoryHours[c])} h</td><td class="num">${money(s.categories[c] || 0)}</td></tr>`).join('')}</tbody>
           </table></div>
         </div>
-        <div class="panel">${notInvoicedHTML(C.addMonths(C.monthKey(t), -1))}</div>
+        <div class="panel" id="notInvPanel">${notInvoicedHTML(C.monthKey(t))}</div>
       </div>`;
 
     $('#dMonth').onchange = e => { state.dashMonth = e.target.value; renderDashboard(el); };
@@ -481,6 +481,28 @@
       const r = JSON.parse(b.dataset.mkinv);
       state.settings.invoiced.push({ ...r, number: '', total: null, at: new Date().toISOString(), manual: true });
       saveSettings(); renderDashboard(el); toast('Marked as invoiced');
+    });
+    // manual items on the not-invoiced list
+    $('#niAddBtn')?.addEventListener('click', () => { state.niAdd = !state.niAdd; renderDashboard(el); if (state.niAdd) $('#niContact')?.focus(); });
+    $('#niCancel')?.addEventListener('click', () => { state.niAdd = false; renderDashboard(el); });
+    $('#niForm')?.addEventListener('submit', e => {
+      e.preventDefault();
+      const contact = $('#niContact').value.trim(), month = $('#niMonth').value, description = $('#niDesc').value.trim();
+      const hours = parseFloat($('#niHours').value) || 0, amount = parseFloat($('#niAmt').value);
+      if (!contact || !month || !description) { toast('Enter who to bill, the month and a description.'); return; }
+      if (!isFinite(amount)) { toast('Enter the amount excluding GST.'); return; }
+      state.settings.pendingItems = state.settings.pendingItems || [];
+      state.settings.pendingItems.push({ id: C.uid(), contact, month, description, hours, amount: C.round2(amount), at: new Date().toISOString() });
+      state.niAdd = false; saveSettings(); renderDashboard(el); toast('Item added');
+    });
+    $$('[data-pidone]', el).forEach(b => b.onclick = () => {
+      const it = (state.settings.pendingItems || []).find(x => x.id === b.dataset.pidone); if (!it) return;
+      it.done = new Date().toISOString(); saveSettings(); renderDashboard(el); toast('Marked as invoiced');
+    });
+    $$('[data-pidel]', el).forEach(b => b.onclick = () => {
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Confirm'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.innerHTML = '&times;'; } }, 4000); return; }
+      state.settings.pendingItems = (state.settings.pendingItems || []).filter(x => x.id !== b.dataset.pidel);
+      saveSettings(); renderDashboard(el); toast('Item deleted');
     });
     drawDashboardCharts(s, months, isCurrent);
   }
@@ -500,23 +522,55 @@
   function isInvoiced(mk, client, projects) {
     return state.settings.invoiced.find(i => i.month === mk && i.client === client && projects.every(p => i.projects.includes(p)));
   }
-  // Previous month billable work that has not yet been invoiced.
-  function notInvoicedHTML(mk) {
-    const groups = invoiceGroups(mk).filter(gx => !isInvoiced(mk, gx.client, gx.projects));
-    const head = `<div class="panel-head"><h2>Previous month work not invoiced</h2><span class="note">${C.monthLabel(mk)}</span></div>`;
-    if (!groups.length) return head + `<p class="muted">All billable work for ${C.monthLabel(mk)} has been invoiced.</p>`;
-    const tH = groups.reduce((a, g) => a + g.hours, 0), tA = groups.reduce((a, g) => a + g.amount + g.kmAmt, 0);
-    return head + `<div class="table-wrap"><table>
-        <thead><tr><th>Bill to</th><th>Projects</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
-        <tbody>${groups.map(gx => `<tr>
-            <td>${esc(gx.contact)}${gx.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(gx.reference)}</div>` : ''}</td>
-            <td>${esc(gx.client)}: ${gx.projects.map(esc).join(', ')}</td>
-            <td class="num">${hrs(gx.hours)}</td><td class="num">${money(gx.amount + gx.kmAmt)}</td>
-            <td style="white-space:nowrap"><button class="btn btn-small btn-ghost" data-prep='${esc(JSON.stringify([gx.client, gx.projects, mk]))}'>Prepare</button>
-            <button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-mkinv='${esc(JSON.stringify({ month: mk, client: gx.client, projects: gx.projects }))}'>Done</button></td>
-          </tr>`).join('')}</tbody>
+  // Months before the current one that can still hold uninvoiced work (from the app's start date)
+  function nonCurrentMonths(curMk) {
+    const from = C.monthKey(state.settings.fromDate || '2026-09-01');
+    const ms = new Set();
+    for (const r of state.data.rows) { const m = C.monthKey(r.date); if (m >= from && m < curMk) ms.add(m); }
+    for (let m = from; m < curMk; m = C.addMonths(m, 1)) ms.add(m);
+    return [...ms].sort();
+  }
+  // Billable work from months before the current one that has not been invoiced, by customer then month,
+  // plus items added by hand (settings.pendingItems).
+  function notInvoicedHTML(curMk) {
+    const months = nonCurrentMonths(curMk);
+    const cust = new Map();
+    const add = (contact, row) => { if (!cust.has(contact)) cust.set(contact, []); cust.get(contact).push(row); };
+    for (const mk of months) for (const gx of invoiceGroups(mk)) if (!isInvoiced(mk, gx.client, gx.projects)) add(gx.contact, { mk, g: gx, hours: gx.hours, amt: gx.amount + gx.kmAmt });
+    for (const it of (state.settings.pendingItems || [])) if (!it.done) add(it.contact, { mk: it.month, item: it, hours: +it.hours || 0, amt: +it.amount || 0 });
+    const list = [...cust.entries()].map(([contact, rows]) => ({ contact, rows: rows.sort((a, b) => a.mk.localeCompare(b.mk) || (a.item ? 1 : 0) - (b.item ? 1 : 0)), hours: rows.reduce((a, r) => a + r.hours, 0), amt: rows.reduce((a, r) => a + r.amt, 0) }))
+      .sort((a, b) => a.contact.localeCompare(b.contact));
+    const contacts = [...new Set([...Object.keys(state.settings.contacts || {}), ...Object.values(state.settings.projects || {}).map(p => p.contact).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+    const range = months.length ? (months.length > 1 ? `${C.monthLabel(months[0])} to ${C.monthLabel(months[months.length - 1])}` : C.monthLabel(months[0])) : '';
+    const head = `<div class="panel-head"><h2>Non current work not invoiced</h2><span class="note">${range}</span></div>`;
+    const form = state.niAdd ? `<form id="niForm" class="no-print" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 14px;padding:10px;border:1px solid var(--line);border-radius:8px">
+        <label class="field" style="grid-column:1/-1"><span>Bill to</span><input type="text" id="niContact" list="niContacts" required placeholder="Customer name"></label>
+        <datalist id="niContacts">${contacts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+        <label class="field" style="grid-column:1/-1"><span>Description</span><input type="text" id="niDesc" required placeholder="e.g. Garden check 14 Oct, not on INV-0517"></label>
+        <label class="field"><span>Month</span><select id="niMonth">${months.slice().reverse().map(m => `<option value="${m}">${C.monthLabel(m)}</option>`).join('')}</select></label>
+        <label class="field"><span>Hours (optional)</span><input type="number" id="niHours" min="0" step="0.25"></label>
+        <label class="field"><span>Amount excl GST</span><input type="number" id="niAmt" step="0.01" required></label>
+        <div style="display:flex;gap:8px;align-items:flex-end"><button class="btn btn-small" type="submit">Add</button><button class="btn btn-small btn-quiet" type="button" id="niCancel">Cancel</button></div>
+      </form>` : '';
+    const addBtn = `<div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn btn-small btn-quiet" id="niAddBtn" type="button">${state.niAdd ? 'Close' : '+ Add item'}</button></div>`;
+    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn;
+    const tH = list.reduce((a, c) => a + c.hours, 0), tA = list.reduce((a, c) => a + c.amt, 0);
+    const rowHTML = r => r.item ? `<tr>
+            <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
+            <td>${esc(r.item.description)} <span class="chip" style="font-size:.7rem">Added</span></td>
+            <td class="num">${r.hours ? hrs(r.hours) : ''}</td><td class="num">${money(r.amt)}</td>
+            <td style="white-space:nowrap"><button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-pidone="${esc(r.item.id)}">Done</button>
+            <button class="btn btn-small btn-danger" title="Delete this item" data-pidel="${esc(r.item.id)}">&times;</button></td></tr>` : `<tr>
+            <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
+            <td>${esc(r.g.client)}: ${r.g.projects.map(esc).join(', ')}${r.g.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(r.g.reference)}</div>` : ''}</td>
+            <td class="num">${hrs(r.hours)}</td><td class="num">${money(r.amt)}</td>
+            <td style="white-space:nowrap"><button class="btn btn-small btn-ghost" data-prep='${esc(JSON.stringify([r.g.client, r.g.projects, r.mk]))}'>Prepare</button>
+            <button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-mkinv='${esc(JSON.stringify({ month: r.mk, client: r.g.client, projects: r.g.projects }))}'>Done</button></td></tr>`;
+    return head + form + `<div class="table-wrap"><table>
+        <thead><tr><th>Customer / month</th><th>Work</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
+        <tbody>${list.map(c => `<tr style="background:var(--paper-2, rgba(0,0,0,.03))"><td colspan="2"><strong>${esc(c.contact)}</strong></td><td class="num"><strong>${hrs(c.hours)}</strong></td><td class="num"><strong>${money(c.amt)}</strong></td><td></td></tr>${c.rows.map(rowHTML).join('')}`).join('')}</tbody>
         <tfoot><tr><td colspan="2">Total not invoiced</td><td class="num">${hrs(tH)}</td><td class="num">${money(tA)}</td><td></td></tr></tfoot>
-      </table></div>`;
+      </table></div>` + addBtn;
   }
 
   function drawDashboardCharts(s, months, isCurrent) {
