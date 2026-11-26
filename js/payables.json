@@ -1,0 +1,5 @@
+[
+  { "supplier": "Ardmore Nurseries Ltd", "number": "INV/2026/4862", "date": "2026-11-20", "dueDate": "2026-11-20", "excl": 1812.50, "total": 2084.38, "bank": "02-0358-0071815-00", "payRef": "INV/2026/4862 GREECON", "file": "Ardmore INV_2026_4862.pdf" },
+  { "supplier": "Baker Boys Wholesale Nurserymen Ltd", "number": "INV-26862", "date": "2026-10-20", "dueDate": "2026-11-20", "excl": 1600.00, "total": 1840.00, "bank": "03-0351-0048153-00", "payRef": "INV-26862", "file": "Baker Invoice INV-26862.pdf" },
+  { "supplier": "Zealandia Horticulture Ltd", "number": "4027395", "date": "2026-10-05", "dueDate": "2026-11-20", "dueAssumed": true, "excl": 3423.64, "total": 3937.19, "bank": "02-0800-0565595-000", "payRef": "4027395 Cust 9137", "file": "Zealandia PTN_9137_4027395.pdf" }
+]

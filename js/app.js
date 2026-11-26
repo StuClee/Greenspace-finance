@@ -375,7 +375,7 @@
   // DASHBOARD
   // ======================================================================
   function renderDashboard(el) {
-    seedPayables();
+    loadPayableSeeds(() => renderDashboard(el));
     const d = state.data;
     const months = allMonths();
     const t = todayISO();
@@ -611,16 +611,26 @@
   }
 
   // ----- Accounts payable: supplier invoices to pay (settings.payables) -----
-  // Seeded once from the PDFs in Greenspace Consulting\Invoices\Supplier (read 26 Nov 2026); after that, edit in the app.
-  const AP_SEED = [
-    { supplier: 'Ardmore Nurseries Ltd', number: 'INV/2026/4862', date: '2026-11-20', dueDate: '2026-11-20', excl: 1812.50, total: 2084.38, note: 'Pittosporum crassifolium 8L x 97 + Ardmore Truck (order Karo)', file: 'Ardmore INV_2026_4862.pdf', bank: '02-0358-0071815-00', payRef: 'INV/2026/4862 GREECON' },
-    { supplier: 'Baker Boys Wholesale Nurserymen Ltd', number: 'INV-26862', date: '2026-10-20', dueDate: '2026-11-20', excl: 1600.00, total: 1840.00, note: 'Cycas revoluta 17L x2, 35L x3; Rhopalostylis 80L x2; freight (10 Rarere Terrace, Hauraki)', file: 'Baker Invoice INV-26862.pdf', bank: '03-0351-0048153-00', payRef: 'INV-26862' }
-  ];
-  function seedPayables() {
-    const s = state.settings; s.payables = s.payables || []; s.apSeen = s.apSeen || [];
-    let added = false;
-    for (const b of AP_SEED) if (!s.apSeen.includes(b.number)) { s.apSeen.push(b.number); if (!s.payables.some(x => x.number === b.number && x.supplier === b.supplier)) s.payables.push({ id: C.uid(), ...b }); added = true; }
-    if (added) saveSettings();
+  // Bills come from js/payables.json (kept up to date from the PDFs in Greenspace Consulting\Invoices\Supplier).
+  // Each bill is added once, by supplier + invoice number; after that, Paid / delete in the app are kept.
+  let apSeedsLoaded = false;
+  async function loadPayableSeeds(redraw) {
+    if (apSeedsLoaded) return; apSeedsLoaded = true;
+    try {
+      const r = await fetch('js/payables.json', { cache: 'no-store' });
+      if (!r.ok) return;
+      const list = await r.json();
+      const s = state.settings; s.payables = s.payables || []; s.apSeen = s.apSeen || [];
+      let added = 0;
+      for (const b of Array.isArray(list) ? list : []) {
+        if (!b || !b.number || !b.supplier) continue;
+        const key = b.supplier + '|' + b.number;
+        if (s.apSeen.includes(key) || s.apSeen.includes(b.number)) continue;
+        s.apSeen.push(key);
+        if (!s.payables.some(x => x.number === b.number && x.supplier === b.supplier)) { s.payables.push({ id: C.uid(), supplier: b.supplier, number: b.number, date: b.date || '', dueDate: b.dueDate || '', total: +b.total || 0, excl: +b.excl || 0, bank: b.bank || '', payRef: b.payRef || '', file: b.file || '' }); added++; }
+      }
+      if (added) { saveSettings(); if (redraw && state.view === 'dashboard') redraw(); }
+    } catch { /* no payables file yet */ }
   }
   function payablesHTML() {
     const list = (state.settings.payables || []).filter(b => !b.paid).sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
