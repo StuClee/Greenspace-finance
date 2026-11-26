@@ -816,6 +816,25 @@
     return { L, ty, ly, mt, ml, done, outlook, clients, lapsed, cTot, pos, haveMonths };
   }
 
+  // Part month in "To today" view: the month is not finished and month-end invoices are not raised yet,
+  // so add the month's work not yet invoiced (timesheet less what is invoiced in the app or matched in Xero,
+  // plus uninvoiced landscaping materials, Other items and pending items). Excl GST.
+  function perfWip(X) {
+    const mk = C.monthKey(X.asAt);
+    if (X.asAt === C.monthEnd(mk) || !X.nMonths) return null;
+    const idx = X.nMonths - 1, xs = state.niXero || {};
+    const end = C.monthEnd(mk), start = C.monthStart(mk);
+    let work = 0, mats = 0, other = 0;
+    for (const gx of invoiceGroups(mk)) {
+      if (isInvoiced(mk, gx.client, gx.projects) || xeroMatch(gx)) continue;
+      work += gx.amount + gx.kmAmt;
+    }
+    for (const it of (state.settings.pendingItems || [])) if (!it.done && it.month === mk) work += +it.amount || 0;
+    for (const x of (state.config.materials || [])) if (!x.invoice && x.date >= start && x.date <= end) mats += C.matCalc(x).total;
+    for (const o of (state.config.otherItems || [])) if (!o.invoice && o.date >= start && o.date <= end) other += otherAmt(o);
+    return { mk, idx, work, mats, other, total: work + mats + other, checking: !xs.invoices && !xs.error, xeroError: xs.error || null };
+  }
+
   // Change chip: green when the movement is good for the business, red when bad
   function delta(tyV, lyV, goodWhenUp = true, asPts = false, pctOnly = false) {
     if (lyV == null || tyV == null) return '';
@@ -879,7 +898,10 @@
       return;
     }
     const M = perfModel(X);
+    M.wip = perfWip(X);
+    if (M.wip) loadNiXero(() => { if (state.view === 'performance') renderPerformance(el); });
     const { ty, ly, pos, outlook } = M;
+    const W = M.wip, wMon = W ? C.monthLabel(W.mk).split(' ')[0] : '';
     const margin = (a, b) => b ? a / b : null;
     const top = M.clients[0];
     const updated = new Date(X.fetchedAt).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit' });
@@ -906,8 +928,9 @@
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>Cumulative revenue</h2>
-            <div class="legend"><span><i style="background:var(--accent)"></i>This year</span><span><i class="dash" style="--c:var(--soil)"></i>Last year</span>${outlook ? '<span><i class="dot" style="--c:var(--accent)"></i>Outlook</span>' : ''}</div></div>
+            <div class="legend"><span><i style="background:var(--accent)"></i>This year</span><span><i class="dash" style="--c:var(--soil)"></i>Last year</span>${W ? '<span><i style="background:var(--good-soft);height:8px;border:1px solid var(--good)"></i>Work not yet invoiced</span>' : ''}${outlook ? '<span><i class="dot" style="--c:var(--accent)"></i>Outlook</span>' : ''}</div></div>
           <div class="chart-box"><canvas id="pCum" aria-label="Cumulative revenue this year against last year"></canvas></div>
+          ${W ? `<p class="note">${esc(wMon)} is not finished: the dotted part of this year's line is only what is in Xero so far, as month-end invoices are dated the last day of the month. The shaded part adds ${esc(wMon)} work not yet invoiced: ${money0(W.total)}${W.mats || W.other ? ` (timesheet ${money0(W.work)}${W.mats ? `, materials ${money0(W.mats)}` : ''}${W.other ? `, other items ${money0(W.other)}` : ''})` : ' from the timesheet'}, excl GST.${W.checking ? ' Checking Xero for invoices already raised ...' : W.xeroError ? ' Could not check Xero, so only invoices recorded in this app are taken off.' : ''}</p>` : ''}
           ${outlook ? `<p class="note">Outlook: the completed months' pace against last year, applied to last year's remaining months. It keeps last year's seasonal pattern.</p>` : ''}
         </div>
         <div class="panel">
@@ -1507,10 +1530,17 @@
       const cum = (arr, upto) => { let s = 0; return FY_MONTHS.map((_, i) => { if (i >= upto || !arr[i]) return null; s += arr[i].income; return s; }); };
       const tyN = M.mt.filter(Boolean).length;
       const tyC = cum(M.mt, tyN), lyC = cum(M.ml, 12);
+      const W = M.wip, pi = W ? W.idx : -1;
       const ds = [
-        { label: 'This year', data: tyC, borderColor: acc, backgroundColor: acc + '22', fill: true, tension: .2, borderWidth: 2.5, pointRadius: ctx => ctx.dataIndex === tyN - 1 ? 4 : 0, pointBackgroundColor: acc },
+        { label: W ? 'This year (in Xero)' : 'This year', data: tyC, borderColor: acc, backgroundColor: acc + '22', fill: true, tension: .2, borderWidth: 2.5, pointRadius: ctx => ctx.dataIndex === tyN - 1 ? 4 : 0, pointBackgroundColor: acc,
+          segment: { borderDash: ctx => ctx.p1DataIndex === pi ? [3, 4] : undefined } },
         { label: 'Last year', data: lyC, borderColor: soil, borderDash: [5, 4], borderWidth: 2, pointRadius: 0, fill: false, tension: .2 }
       ];
+      if (W && W.total > 0.5 && pi > 0 && tyC[pi] != null) {
+        const wd = FY_MONTHS.map((_, i) => i === pi - 1 ? tyC[i] : i === pi ? tyC[i] + W.total : null);
+        ds.push({ label: 'Incl work not yet invoiced', wip: W.total, data: wd, borderColor: good, backgroundColor: goodSoft || good + '33', borderDash: [3, 4], borderWidth: 2,
+          pointRadius: ctx => ctx.dataIndex === pi ? 4 : 0, pointBackgroundColor: good, fill: { target: 0, above: goodSoft || good + '33' }, tension: 0 });
+      }
       if (M.outlook) {
         const d = M.outlook.done, g = (() => { let a = 0, b = 0; for (let i = 0; i < d; i++) { a += M.mt[i]?.income || 0; b += M.ml[i]?.income || 0; } return b ? a / b : 1; })();
         let s = M.mt.slice(0, d).reduce((a, m) => a + (m?.income || 0), 0);
@@ -1519,7 +1549,7 @@
       }
       state.pcharts.cum = new Chart($('#pCum'), {
         type: 'line', data: { labels: FY_MONTHS, datasets: ds },
-        options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y == null ? null : `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
+        options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y == null || (c.dataset.wip && c.dataIndex !== pi) ? null : c.dataset.wip ? `${c.dataset.label}: ${money0(c.parsed.y)} (+${money0(c.dataset.wip)})` : `${c.dataset.label}: ${money0(c.parsed.y)}` } } },
           scales: { x: { grid: { display: false } }, y: { beginAtZero: true, grid: { color: line }, ticks: { callback: fmtK } } } }
       });
     }
