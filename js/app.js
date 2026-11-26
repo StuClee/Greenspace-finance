@@ -159,7 +159,7 @@
   function defaultConfig() {
     const d = clone(window.GS_DEFAULT_CONFIG);
     const st = defaultSettings(); st.tiers = { A: 0.2, B: 0.15, C: 0.1, D: 0.05 };
-    return { projects: d.projects, targets: d.targets, mileageRate: d.mileageRate, materials: [], settings: st };
+    return { projects: d.projects, targets: d.targets, mileageRate: d.mileageRate, landMileageRate: d.landMileageRate ?? 0.5, materials: [], settings: st };
   }
   function defaultSettings() {
     const d = clone(window.GS_BILLING_DEFAULTS);
@@ -177,7 +177,7 @@
     s.contacts = Object.assign(clone(window.GS_BILLING_DEFAULTS.contacts), (c.settings && c.settings.contacts) || {});
     s.invoiced = (c.settings && c.settings.invoiced) || [];
     s.tiers = Object.assign({ A: 0.2, B: 0.15, C: 0.1, D: 0.05 }, (c.settings && c.settings.tiers) || {});
-    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, materials: c.materials || [], otherItems: c.otherItems || [], archivedMaterials: c.archivedMaterials || [], settings: s };
+    return { projects: c.projects && c.projects.length ? c.projects : d.projects, targets: c.targets || d.targets, mileageRate: c.mileageRate || d.mileageRate, landMileageRate: c.landMileageRate ?? d.landMileageRate, materials: c.materials || [], otherItems: c.otherItems || [], archivedMaterials: c.archivedMaterials || [], settings: s };
   }
 
   const state = {
@@ -193,7 +193,18 @@
     state.settings = state.config.settings;
     if (state.data) { state.data.targets = effectiveTargets(); state.data.projects = state.config.projects; state.data.mileageRate = state.config.mileageRate; }
   }
+  // Landscaping mileage is charged at its own rate (Setup), except on work already invoiced
+  function isLandRow(r) { return !!r.kms && (r.project === 'Landscaping' || billingFor(r.client, r.project).schedule === 'land'); }
+  function landKm(r) {
+    const rate = +state.config.landMileageRate;
+    if (!isLandRow(r) || !(rate >= 0) || r.kmRate === rate) return r;
+    const mk = C.monthKey(r.date);
+    if ((state.settings.invoiced || []).some(i => i.month === mk && i.client === r.client && (!i.projects || !i.projects.length || i.projects.includes(r.project)))) return r;
+    r.kmRate = rate; r.kmAmt = C.round2(r.kms * rate);
+    return r;
+  }
   function setRows(rows) {
+    rows.forEach(landKm);
     state.dayBase = {};
     for (const r of rows) (state.dayBase[r.date] = state.dayBase[r.date] || []).push(clone(r));
     state.data = { rows: rows.slice().sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), targets: effectiveTargets(), projects: state.config.projects, mileageRate: state.config.mileageRate, fromDate: state.settings.fromDate };
@@ -1717,7 +1728,7 @@
       const vals = { date, time: $('#fStart').value, end: $('#fEnd').value, client: $('#fClient').value, project: $('#fProject').value, activity: $('#fActivity').value, kms: $('#fKms').value, notes: $('#fNotes').value };
       if (!vals.time || !vals.end || C.toMin(vals.end) <= C.toMin(vals.time)) { toast('End time must be after the start time.'); return; }
       if (!vals.client || !vals.project) { toast('Choose a client and project. Add new ones on the Setup page.'); return; }
-      const entry = C.makeEntry(vals, state.config, prev);
+      const entry = landKm(C.makeEntry(vals, state.config, prev));
       if (prev) state.data.rows = state.data.rows.map(r => r.id === prev.id ? entry : r);
       else state.data.rows.push(entry);
       state.data.rows.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
@@ -2970,7 +2981,9 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
               <td>${(cfg.targets[m] || {}).plan ? `<button class="btn btn-small" data-plan="${m}">Edit plan</button> <span class="chip ok">${hrs(planTotal(cfg.targets[m].plan))} days</span>` : `<button class="btn btn-small btn-quiet" data-plan="${m}">Plan days</button>`}</td></tr>`; }).join('')}</tbody>
           </table></div>
           ${state.planMonth ? planHTML(state.planMonth) : ''}
-          <label class="field" style="margin-top:12px;max-width:220px"><span>Mileage rate $/km</span><input type="number" min="0" step="0.01" id="sMileage" value="${cfg.mileageRate}"></label>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px"><label class="field" style="max-width:220px"><span>Mileage rate $/km</span><input type="number" min="0" step="0.01" id="sMileage" value="${cfg.mileageRate}"></label>
+          <label class="field" style="max-width:220px"><span>Landscaping mileage $/km</span><input type="number" min="0" step="0.01" id="sLandMileage" value="${cfg.landMileageRate}"></label></div>
+          <p class="note">Landscaping mileage applies to Landscaping projects and any project set to the Landscaping schedule, except months already invoiced.</p>
         </div>
       </div>
 
@@ -3072,6 +3085,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       saved(); renderSetup(el); toast('Saved');
     });
     $('#sMileage').onchange = e => { cfg.mileageRate = +e.target.value || 0.8; state.data.mileageRate = cfg.mileageRate; saved(); toast('Saved'); };
+    $('#sLandMileage').onchange = e => { const v = parseFloat(e.target.value); cfg.landMileageRate = isFinite(v) && v >= 0 ? v : 0.5; state.data.rows.forEach(landKm); saved(); toast('Saved'); };
     $$('tr[data-key] [data-f]', el).forEach(inp => inp.onchange = () => {
       const k = inp.closest('tr').dataset.key;
       const p = s.projects[k] = Object.assign({ contact: '', reference: '', header: '', due: '20th' }, s.projects[k]);

@@ -54,6 +54,7 @@ window.GS_BILLING_DEFAULTS = {
    Used only until you import your workbook or edit them on the Setup page. */
 window.GS_DEFAULT_CONFIG = {
   mileageRate: 0.8,
+  landMileageRate: 0.5, // landscaping work
   projects: [
     ...['SF', 'SF Projects', 'Tender', 'Riverhead War Memorial', 'Stadiums'].map(p => ({ client: 'AC', project: p, rate: 150 })),
     ...['Sports', 'Field Team', 'Contract', 'Work Mgt System'].map(p => ({ client: 'QLDC', project: p, rate: 150 })),
