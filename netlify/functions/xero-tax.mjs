@@ -3,7 +3,7 @@ import { session, xeroApi, json } from './_xero.mjs';
 // GET /api/xero-tax?periods=YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD&basis=payments|invoice
 // Tax position for the Tax page.
 // -> { today, fyStart, lyFyStart, bs, months, ly, gst: [{ start, end, sales, purchases }], irdPayments, errors }
-//   bs     = tax balances at today from the balance sheet: { gst, paye, deductions, wagesPayable, incomeTax, rwt }
+//   bs     = tax balances at today from the balance sheet: { gst, paye, deductions, wagesPayable, incomeTax, rwt, bank, bankAccounts }
 //   months = this FY by month (Apr ..), each { mk, income, otherIncome, cogs, expenses, np, incomeTaxExp, nonDeductible, wages: { stu, rachel, other }, kiwisaver }
 //   ly     = last FY totals { np, incomeTaxExp, nonDeductible }
 //   gst    = for each requested period, invoice-basis GST from invoices, credit notes, bills and spend/receive money
@@ -80,7 +80,10 @@ function parseBs(body) {
     wagesPayable: pick(/^wages payable/i),
     incomeTax: pick(/^income tax$/i),
     rwt: pick(/withholding tax paid|rwt/i),
-    rows: rows.filter(r => /gst|paye|tax|wages|deduction/i.test(r.name))
+    rows: rows.filter(r => /gst|paye|tax|wages|deduction/i.test(r.name)),
+    // cash at bank today (for the cashflow forecast): every account in the Bank section
+    bank: rows.filter(r => /^bank/i.test(r.section)).reduce((a, r) => a + r.v, 0),
+    bankAccounts: rows.filter(r => /^bank/i.test(r.section)).map(r => ({ name: r.name, v: r.v }))
   };
 }
 
