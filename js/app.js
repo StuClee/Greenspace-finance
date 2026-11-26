@@ -1033,7 +1033,8 @@
   ];
   function cfSettings() {
     const s = state.settings;
-    s.cashflow = Object.assign({ over: {}, oneoffs: [], regular: null, wagesWhen: 'monthEnd' }, s.cashflow || {});
+    s.cashflow = Object.assign({ over: {}, oneoffs: [], regular: null }, s.cashflow || {});
+    s.cashflow.drawings = Object.assign({ rent: 1100, allowance: 50, fuel: 100, from: 20, to: 30 }, s.cashflow.drawings || {});
     if (!Array.isArray(s.cashflow.regular)) s.cashflow.regular = CF_REGULAR_SEED.map(r => ({ id: C.uid(), freq: 'monthly', ...r }));
     return s.cashflow;
   }
@@ -1092,15 +1093,32 @@
     // ----- payments
     line('suppliers', 'Suppliers (accounts payable)', 'out', 'Unpaid bills on the Dashboard, on their due date (overdue ones this week)');
     for (const b of state.settings.payables || []) if (!b.paid) put('suppliers', b.dueDate || today, +b.total || 0, `${b.supplier} ${b.number}`);
-    line('wages', 'Wages (net pay)', 'out', 'FY27 wages plan less PAYE and employee KiwiSaver, paid on the last working day of the month');
+    const dr = cf.drawings;
+    line('drRent', 'Drawings: rent (Fridays)', 'out', `Rent ${money(+dr.rent || 0)} every Friday`);
+    line('drDaily', 'Drawings: allowance and fuel', 'out', `Personal allowance ${money(+dr.allowance || 0)} a day, fuel ${money(+dr.fuel || 0)} a week (Fridays)`);
+    line('drBulk', `Drawings: balance (${dr.from}th to ${dr.to}th)`, 'out', `Each month's net pay from the FY27 wages plan (after PAYE and KiwiSaver), less the rent, allowance and fuel above, spread evenly from the ${dr.from}th to the ${dr.to}th`);
     line('ird', 'Inland Revenue (GST, PAYE, income tax)', 'out', 'Due dates and amounts from the Tax page; overdue ones this week');
     if (X) {
       let TM = null; try { TM = taxModel(X); } catch (e) { console.warn('tax model', e); }
       if (TM) {
+        // Drawings: weekly rent and fuel on Fridays, a daily allowance, and the rest of the month's net pay spread over the 20th to the 30th
         for (const r of TM.paye) {
-          const pay = lastWorkingDay(r.mk); if (pay < today) continue;
+          const mStart = C.monthStart(r.mk), mEnd = C.monthEnd(r.mk);
+          if (mEnd < weeks[0].start || mStart > lastDay) continue;
           const net = C.round2(r.stu + r.rachel - r.stuPaye - r.rPaye - r.ks);
-          put('wages', pay, net, `${C.monthLabel(r.mk)} pay (gross ${money(r.stu + r.rachel)})`);
+          let fixed = 0;
+          for (let d = mStart; d <= mEnd; d = C.addDays(d, 1)) {
+            const fri = C.weekday(d) === 5;
+            fixed += (+dr.allowance || 0) + (fri ? (+dr.rent || 0) + (+dr.fuel || 0) : 0);
+            if (d < today) continue;
+            if (fri && +dr.rent) put('drRent', d, +dr.rent, `Rent ${C.fmtDateNZ(d)}`);
+            if (+dr.allowance) put('drDaily', d, +dr.allowance, `Allowance ${C.fmtDateNZ(d)}`);
+            if (fri && +dr.fuel) put('drDaily', d, +dr.fuel, `Fuel ${C.fmtDateNZ(d)}`);
+          }
+          const bulk = C.round2(Math.max(0, net - fixed));
+          const dim = +mEnd.slice(8), a = Math.min(+dr.from || 20, dim), b = Math.min(Math.max(+dr.to || 30, a), dim);
+          const per = C.round2(bulk / (b - a + 1));
+          for (let k = a; k <= b; k++) { const d = `${r.mk}-${C.pad(k)}`; if (d >= today) put('drBulk', d, per, `${C.monthLabel(r.mk)}: ${money(net)} net pay less ${money(fixed)} weekly drawings = ${money(bulk)}, ${C.fmtDateNZ(d)}`); }
         }
         for (const e of TM.upcoming) if (!e.paid && e.amount > 0) put('ird', e.date, e.amount, e.what);
       }
@@ -1197,13 +1215,21 @@
           ${oneRows ? `<div class="table-wrap"><table><tbody>${oneRows}</tbody></table></div>` : ''}
         </div>
         <div>
+          <h3>Drawings</h3>
+          <div style="display:grid;grid-template-columns:repeat(5,auto);gap:6px;align-items:end;margin-bottom:12px">
+            <label class="field"><span>Rent / Fri</span><input type="number" step="1" data-dr="rent" value="${cf.drawings.rent}" style="width:6em"></label>
+            <label class="field"><span>Allowance / day</span><input type="number" step="1" data-dr="allowance" value="${cf.drawings.allowance}" style="width:6em"></label>
+            <label class="field"><span>Fuel / week</span><input type="number" step="1" data-dr="fuel" value="${cf.drawings.fuel}" style="width:6em"></label>
+            <label class="field"><span>Balance from</span><input type="number" min="1" max="31" data-dr="from" value="${cf.drawings.from}" style="width:4em"></label>
+            <label class="field"><span>to</span><input type="number" min="1" max="31" data-dr="to" value="${cf.drawings.to}" style="width:4em"></label>
+          </div>
           <h3>Regular payments</h3>
           <div class="table-wrap"><table><thead><tr><th>Payment</th><th class="num">Amount</th><th class="num">Day</th><th></th></tr></thead><tbody>${regRows}</tbody></table></div>
           <button class="btn btn-small btn-quiet" type="button" id="cfRegAdd">+ Add regular payment</button>
           <p class="note">Monthly, on that day of the month (incl GST). Started from the payments seen in Westpac in November; insurance (AIA), power and phone amounts were not known, so add them here.</p>
         </div>
       </div>
-      <p class="note">Assumptions: customers pay on the due date; bills are paid on their due date; GST, PAYE and income tax as on the Tax page; wages from the FY27 plan paid at month end (Westpac shows Stu's pay going out weekly, $1,750, so override the wages row if that is how it is paid). Opening cash is the Xero bank balance, so anything not yet reconciled in Xero is not in it.</p>`;
+      <p class="note">Assumptions: customers pay on the due date; bills are paid on their due date; GST, PAYE and income tax as on the Tax page; drawings total each month's net pay from the FY27 wages plan (after PAYE and KiwiSaver), as rent, allowance and fuel through the month with the balance spread over the 20th to the 30th. Opening cash is the Xero bank balance, so anything not yet reconciled in Xero is not in it.</p>`;
   }
 
   function drawCashflowChart(M) {
@@ -1246,6 +1272,7 @@
       const r = cf.regular.find(x => x.id === inp.dataset.reg); if (!r) return;
       const f = inp.dataset.rf; r[f] = f === 'name' ? inp.value.trim() : (+inp.value || 0); save();
     });
+    $$('[data-dr]', box).forEach(inp => inp.onchange = () => { const v = parseFloat(inp.value); cf.drawings[inp.dataset.dr] = isFinite(v) ? v : 0; save(); });
     $$('[data-regdel]', box).forEach(b => b.onclick = () => { cf.regular = cf.regular.filter(r => r.id !== b.dataset.regdel); save(); });
     $('#cfRegAdd', box)?.addEventListener('click', () => { cf.regular.push({ id: C.uid(), name: 'New payment', amount: 0, day: 20, freq: 'monthly' }); save(); });
   }
