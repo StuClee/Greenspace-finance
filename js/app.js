@@ -3321,7 +3321,21 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
 
   // When you come back to this tab, pick up settings changed in another tab or on another device,
   // so this tab is not working from an old copy.
+  // Tell a tab that is still running an older copy of the app once a new version has been uploaded
+  const appStamp = async () => { try { const r = await fetch('js/app.js', { method: 'HEAD', cache: 'no-store' }); return r.headers.get('etag') || r.headers.get('last-modified') || ''; } catch { return ''; } };
+  let loadedStamp = null; appStamp().then(v => { loadedStamp = v; });
+  async function checkAppVersion() {
+    if (!loadedStamp || document.getElementById('updBanner')) return;
+    const now = await appStamp();
+    if (!now || now === loadedStamp) return;
+    const b = document.createElement('div'); b.id = 'updBanner';
+    b.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:9999;background:#1b241e;color:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.25);font-size:.9rem;display:flex;gap:12px;align-items:center';
+    b.innerHTML = 'A new version of the app has been uploaded. This tab is still running the old one. <button class="btn btn-small" type="button">Reload now</button>';
+    b.querySelector('button').onclick = () => location.reload();
+    document.body.appendChild(b);
+  }
   document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') checkAppVersion();
     if (document.visibilityState !== 'visible' || db.mode !== 'server' || !state.data || state.saving) return;
     try {
       const res = await db.getJSON('/api/db');
