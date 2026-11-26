@@ -482,6 +482,19 @@
       state.settings.invoiced.push({ ...r, number: '', total: null, at: new Date().toISOString(), manual: true });
       saveSettings(); renderDashboard(el); toast('Marked as invoiced');
     });
+    // Xero check for the not-invoiced list
+    loadNiXero(() => renderDashboard(el));
+    $('#niMatched')?.addEventListener('toggle', e => { state.niShowMatched = e.target.open; });
+    $$('[data-unmatch]', el).forEach(b => b.onclick = () => {
+      const [key, num] = JSON.parse(b.dataset.unmatch);
+      state.settings.xeroUnmatch = Object.assign({}, state.settings.xeroUnmatch, { [key]: num });
+      saveSettings(); renderDashboard(el); toast(`Back on the list: not on ${num}`);
+    });
+    $$('[data-rematch]', el).forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      const u = Object.assign({}, state.settings.xeroUnmatch); delete u[a.dataset.rematch];
+      state.settings.xeroUnmatch = u; saveSettings(); renderDashboard(el);
+    });
     // manual items on the not-invoiced list
     $('#niAddBtn')?.addEventListener('click', () => { state.niAdd = !state.niAdd; renderDashboard(el); if (state.niAdd) $('#niContact')?.focus(); });
     $('#niCancel')?.addEventListener('click', () => { state.niAdd = false; renderDashboard(el); });
@@ -514,14 +527,46 @@
     for (const r of rows) {
       const b = billingFor(r.client, r.project);
       const k = r.client + '|' + (b.contact || r.client) + '|' + (b.reference || '');
-      if (!g.has(k)) g.set(k, { client: r.client, contact: b.contact || r.client, reference: b.reference || '', projects: new Set(), hours: 0, amount: 0, kms: 0, kmAmt: 0 });
+      if (!g.has(k)) g.set(k, { client: r.client, contact: b.contact || r.client, reference: b.reference || '', projects: new Set(), hours: 0, amount: 0, kms: 0, kmAmt: 0, first: r.date, last: r.date });
       const x = g.get(k); x.projects.add(r.project); x.hours += r.hours; x.amount += r.amount; x.kms += r.kms; x.kmAmt += r.kmAmt;
+      if (r.date < x.first) x.first = r.date; if (r.date > x.last) x.last = r.date;
     }
     return [...g.values()].filter(x => x.amount > 0 || x.kmAmt > 0).map(x => ({ ...x, projects: [...x.projects] })).sort((a, b) => b.amount - a.amount);
   }
   function isInvoiced(mk, client, projects) {
     return state.settings.invoiced.find(i => i.month === mk && i.client === client && projects.every(p => i.projects.includes(p)));
   }
+  // ----- check the not-invoiced list against the sales invoices actually in Xero -----
+  // A month's work for a customer counts as invoiced when Xero has an invoice (draft, awaiting payment or paid) to the
+  // same contact, with the same reference when the reference is specific (a PO or contract, not "Landscaping Services"),
+  // dated on or after the last day worked in that group. The first such invoice is shown as the match.
+  const normName = v => String(v || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/&/g, 'and').replace(/[^a-z0-9]/g, '');
+  const normRef = v => String(v || '').toLowerCase().replace(/^po\W*/, '').replace(/[^a-z0-9]/g, '');
+  const genericRef = v => !normRef(v) || /^landscap(e|ing)services?$|^supplyplants$|^services?$/.test(normRef(v));
+  function xeroMatch(gx) {
+    const list = state.niXero && state.niXero.invoices; if (!list) return null;
+    const cid = (state.settings.contacts || {})[gx.contact];
+    const name = normName(gx.contact);
+    return list.filter(i => (cid && i.contactId === cid) || normName(i.contactName) === name)
+      .filter(i => genericRef(gx.reference) || normRef(i.reference) === normRef(gx.reference))
+      .filter(i => i.date >= gx.last)
+      .sort((a, b) => a.date.localeCompare(b.date) || a.number.localeCompare(b.number))[0] || null;
+  }
+  const niKey = (mk, gx) => [mk, gx.client, gx.projects.slice().sort().join('+')].join('|');
+  async function loadNiXero(redraw) {
+    const x = state.niXero;
+    if (x && (x.loading || Date.now() - x.at < 5 * 60 * 1000)) return;
+    state.niXero = Object.assign({}, x, { loading: true });
+    try {
+      const from = C.monthStart(C.monthKey(state.settings.fromDate || '2026-09-01')), to = todayISO();
+      const r = await fetch(`/api/xero-numbers?from=${from}&to=${to}`, { headers: { accept: 'application/json' } });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.error) throw new Error(j.error || 'Xero ' + r.status);
+      state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED') };
+    } catch (e) { state.niXero = { at: Date.now(), error: e.message }; }
+    if (redraw && state.view === 'dashboard') redraw();
+  }
+
   // Months before the current one that can still hold uninvoiced work (from the app's start date)
   function nonCurrentMonths(curMk) {
     const from = C.monthKey(state.settings.fromDate || '2026-09-01');
@@ -536,13 +581,31 @@
     const months = nonCurrentMonths(curMk);
     const cust = new Map();
     const add = (contact, row) => { if (!cust.has(contact)) cust.set(contact, []); cust.get(contact).push(row); };
-    for (const mk of months) for (const gx of invoiceGroups(mk)) if (!isInvoiced(mk, gx.client, gx.projects)) add(gx.contact, { mk, g: gx, hours: gx.hours, amt: gx.amount + gx.kmAmt });
+    const unmatch = state.settings.xeroUnmatch || {}, matched = [];
+    for (const mk of months) for (const gx of invoiceGroups(mk)) {
+      if (isInvoiced(mk, gx.client, gx.projects)) continue;
+      const key = niKey(mk, gx), m = xeroMatch(gx);
+      if (m && unmatch[key] !== m.number) { matched.push({ mk, g: gx, m, key }); continue; }
+      add(gx.contact, { mk, g: gx, hours: gx.hours, amt: gx.amount + gx.kmAmt, ignored: m && unmatch[key] === m.number ? m.number : '', key });
+    }
     for (const it of (state.settings.pendingItems || [])) if (!it.done) add(it.contact, { mk: it.month, item: it, hours: +it.hours || 0, amt: +it.amount || 0 });
     const list = [...cust.entries()].map(([contact, rows]) => ({ contact, rows: rows.sort((a, b) => a.mk.localeCompare(b.mk) || (a.item ? 1 : 0) - (b.item ? 1 : 0)), hours: rows.reduce((a, r) => a + r.hours, 0), amt: rows.reduce((a, r) => a + r.amt, 0) }))
       .sort((a, b) => a.contact.localeCompare(b.contact));
     const contacts = [...new Set([...Object.keys(state.settings.contacts || {}), ...Object.values(state.settings.projects || {}).map(p => p.contact).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
     const range = months.length ? (months.length > 1 ? `${C.monthLabel(months[0])} to ${C.monthLabel(months[months.length - 1])}` : C.monthLabel(months[0])) : '';
-    const head = `<div class="panel-head"><h2>Non current work not invoiced</h2><span class="note">${range}</span></div>`;
+    const xs = state.niXero || {};
+    const xNote = xs.loading && !xs.invoices ? '<p class="note">Checking Xero for invoices already raised...</p>'
+      : xs.error ? `<p class="note">Could not check Xero (${esc(xs.error)}), so only invoices recorded in this app are taken off. Connect Xero on the Invoicing page.</p>`
+      : xs.invoices ? `<p class="note">Checked against ${xs.invoices.length} Xero invoices${matched.length ? `; ${matched.length} item${matched.length === 1 ? '' : 's'} matched and taken off` : ''}.</p>` : '';
+    const matchedHTML = matched.length ? `<details class="no-print" style="margin-top:10px"${state.niShowMatched ? ' open' : ''} id="niMatched"><summary class="note" style="cursor:pointer">Matched to Xero invoices (${matched.length})</summary>
+        <div class="table-wrap"><table><thead><tr><th>Customer / month</th><th>Work</th><th class="num">Excl GST</th><th>Xero</th><th></th></tr></thead>
+        <tbody>${matched.sort((a, b) => a.g.contact.localeCompare(b.g.contact) || a.mk.localeCompare(b.mk)).map(r => `<tr>
+          <td>${esc(r.g.contact)}<div class="muted" style="font-size:.75rem">${C.monthLabel(r.mk)}</div></td>
+          <td>${esc(r.g.client)}: ${r.g.projects.map(esc).join(', ')}<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(r.g.first)} to ${C.fmtDateNZ(r.g.last)}</div></td>
+          <td class="num">${money(r.g.amount + r.g.kmAmt)}</td>
+          <td style="white-space:nowrap">${esc(r.m.number)}<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(r.m.date)} · ${money(r.m.total)}${r.m.status === 'DRAFT' ? ' · draft' : r.m.status === 'PAID' ? ' · paid' : ''}</div></td>
+          <td><button class="btn btn-small btn-quiet" title="This work is not on ${esc(r.m.number)}: put it back on the list" data-unmatch='${esc(JSON.stringify([r.key, r.m.number]))}'>Not on it</button></td></tr>`).join('')}</tbody></table></div></details>` : '';
+    const head = `<div class="panel-head"><h2>Non current work not invoiced</h2><span class="note">${range}</span></div>${xNote}`;
     const form = state.niAdd ? `<form id="niForm" class="no-print" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 14px;padding:10px;border:1px solid var(--line);border-radius:8px">
         <label class="field" style="grid-column:1/-1"><span>Bill to</span><input type="text" id="niContact" list="niContacts" required placeholder="Customer name"></label>
         <datalist id="niContacts">${contacts.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
@@ -553,7 +616,7 @@
         <div style="display:flex;gap:8px;align-items:flex-end"><button class="btn btn-small" type="submit">Add</button><button class="btn btn-small btn-quiet" type="button" id="niCancel">Cancel</button></div>
       </form>` : '';
     const addBtn = `<div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn btn-small btn-quiet" id="niAddBtn" type="button">${state.niAdd ? 'Close' : '+ Add item'}</button></div>`;
-    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn;
+    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn + matchedHTML;
     const tH = list.reduce((a, c) => a + c.hours, 0), tA = list.reduce((a, c) => a + c.amt, 0);
     const rowHTML = r => r.item ? `<tr>
             <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
@@ -562,7 +625,7 @@
             <td style="white-space:nowrap"><button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-pidone="${esc(r.item.id)}">Done</button>
             <button class="btn btn-small btn-danger" title="Delete this item" data-pidel="${esc(r.item.id)}">&times;</button></td></tr>` : `<tr>
             <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
-            <td>${esc(r.g.client)}: ${r.g.projects.map(esc).join(', ')}${r.g.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(r.g.reference)}</div>` : ''}</td>
+            <td>${esc(r.g.client)}: ${r.g.projects.map(esc).join(', ')}${r.g.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(r.g.reference)}</div>` : ''}${r.ignored ? `<div class="muted" style="font-size:.75rem">Not on Xero ${esc(r.ignored)} <a href="#" data-rematch="${esc(r.key)}">undo</a></div>` : ''}</td>
             <td class="num">${hrs(r.hours)}</td><td class="num">${money(r.amt)}</td>
             <td style="white-space:nowrap"><button class="btn btn-small btn-ghost" data-prep='${esc(JSON.stringify([r.g.client, r.g.projects, r.mk]))}'>Prepare</button>
             <button class="btn btn-small btn-quiet" title="Record that this has been invoiced" data-mkinv='${esc(JSON.stringify({ month: r.mk, client: r.g.client, projects: r.g.projects }))}'>Done</button></td></tr>`;
@@ -570,7 +633,7 @@
         <thead><tr><th>Customer / month</th><th>Work</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
         <tbody>${list.map(c => `<tr style="background:var(--paper-2, rgba(0,0,0,.03))"><td colspan="2"><strong>${esc(c.contact)}</strong></td><td class="num"><strong>${hrs(c.hours)}</strong></td><td class="num"><strong>${money(c.amt)}</strong></td><td></td></tr>${c.rows.map(rowHTML).join('')}`).join('')}</tbody>
         <tfoot><tr><td colspan="2">Total not invoiced</td><td class="num">${hrs(tH)}</td><td class="num">${money(tA)}</td><td></td></tr></tfoot>
-      </table></div>` + addBtn;
+      </table></div>` + addBtn + matchedHTML;
   }
 
   function drawDashboardCharts(s, months, isCurrent) {
