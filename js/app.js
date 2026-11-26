@@ -127,7 +127,7 @@
         entries = mergeDay(base, entries, j.entries);
         state.dayBase[date] = clone(j.entries);
         state.data.rows = state.data.rows.filter(r => r.date !== date).concat(clone(entries)).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-        state.inv = null; merged = true;
+        merged = true;
       }
       throw new Error('this day keeps changing in another tab, reload the page');
     },
@@ -1697,7 +1697,6 @@
 
   function saveDay(date) {
     const dayEntries = state.data.rows.filter(r => r.date === date);
-    state.inv = null;
     return track(db.saveDay(date, dayEntries));
   }
 
@@ -1909,6 +1908,24 @@
     inv.sf = bs === 'sf';
     inv.land = bs === 'land' || (!inv.sf && (first === 'Landscaping' || (first === '*' && (state.config.materials || []).some(m => m.client === inv.client))));
   }
+  // Keep the open invoice when data or settings change: rebuild its lines on the next render
+  function refreshInv() { if (state.inv) state.inv.stale = true; }
+  // Remember the open invoice (also across reloads) so the page does not fall back to the first client
+  const INV_KEY = 'gs-open-invoice';
+  function rememberInv(inv) {
+    try { localStorage.setItem(INV_KEY, JSON.stringify({ client: inv.client, projects: inv.projects, start: inv.start, end: inv.end, sf: !!inv.sf, land: !!inv.land, matOff: inv.matOff || {}, otherOff: inv.otherOff || {} })); } catch { /* storage blocked */ }
+  }
+  function restoreInv() {
+    let sv; try { sv = JSON.parse(localStorage.getItem(INV_KEY) || 'null'); } catch { sv = null; }
+    if (!sv || !sv.client || !sv.start || !sv.end) return false;
+    const known = billableClients(sv.start, sv.end).includes(sv.client) || (state.config.materials || []).some(m => m.client === sv.client);
+    if (!known) return false;
+    startInvoice(sv.client, sv.projects || [], sv.start, sv.end);
+    const inv = state.inv;
+    inv.sf = !!sv.sf; inv.land = !!sv.land && !inv.sf; inv.matOff = sv.matOff || {}; inv.otherOff = sv.otherOff || {};
+    rebuildInvoice(false);
+    return true;
+  }
   function startInvoice(client, projects, start, end) {
     if (!projects || !projects.length) projects = client ? defaultProjects(client, start, end) : [];
     state.inv = { client, projects: projects || [], start, end, assign: {}, lines: null, meta: null };
@@ -2017,13 +2034,15 @@
   function renderInvoicing(el) {
     const t = todayISO();
     const months = allMonths();
-    if (!state.inv) {
+    if (!state.inv && !restoreInv()) {
       const prev = C.addMonths(C.monthKey(t), -1);
       const mk = months.includes(prev) ? prev : months[months.length - 1];
       const clients = billableClients(C.monthStart(mk), C.monthEnd(mk));
       startInvoice(clients[0] || '', [], C.monthStart(mk), C.monthEnd(mk));
     }
     const inv = state.inv;
+    if (inv.stale) { delete inv.stale; rebuildInvoice(false); }
+    rememberInv(inv);
     loadDays();
     const clients = billableClients(inv.start, inv.end);
     if (inv.client && !clients.includes(inv.client)) clients.unshift(inv.client);
@@ -2531,13 +2550,26 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     }
     return doc;
   }
-  // Save: a normal browser download. Turn on Chrome's "Ask where to save each file" to choose the folder each time.
+  // Save: opens a Save As box (Chrome and Edge) to pick the folder and name; it remembers the last folder.
+  // Other browsers: a normal download to the Downloads folder.
   async function downloadPDF() {
     if (!window.jspdf || !window.jspdf.jsPDF) { toast('The PDF tool did not load. Reload the page and try again.'); return; }
-    let doc, name;
-    try { doc = buildSchedulePDF(); name = pdfName(); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message, 6000); return; }
-    doc.save(name);
-    toast(`Downloaded "${name}". It is in your Downloads folder (Ctrl + J shows it), unless Chrome asks where to save.`, 7000);
+    let blob, name;
+    try { blob = buildSchedulePDF().output('blob'); name = pdfName(); } catch (e) { console.error(e); toast('Could not build the PDF: ' + e.message, 6000); return; }
+    if (window.showSaveFilePicker) {
+      try {
+        const h = await window.showSaveFilePicker({ suggestedName: name, id: 'gs-schedule-pdf', types: [{ description: 'PDF document', accept: { 'application/pdf': ['.pdf'] } }] });
+        const w = await h.createWritable(); await w.write(blob); await w.close();
+        toast(`Saved "${h.name}"`, 5000); return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return; // Save As box cancelled
+        console.warn('Save As not available, downloading instead', e);
+      }
+    }
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    toast(`Downloaded "${name}". It is in your Downloads folder (Ctrl + J shows it).`, 7000);
   }
   // Open: shows the PDF in a new tab to read or print (the tab keeps working, including its own save button)
   function openPDF() {
@@ -2785,7 +2817,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       </div>`;
 
     const rerender = () => { const y = window.scrollY; renderMaterials(el); window.scrollTo({ top: y }); };
-    const save = () => { state.inv = null; saveSettings(); };
+    const save = () => { refreshInv(); saveSettings(); };
     $('#mClient').onchange = e => { state.matClient = e.target.value; rerender(); };
     $('#mOpen').onclick = () => { state.matShow = 'open'; rerender(); };
     $('#mAll').onclick = () => { state.matShow = 'all'; rerender(); };
@@ -3030,7 +3062,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         </div>
       </div>`;
 
-    const saved = () => { state.inv = null; saveSettings(); };
+    const saved = () => { refreshInv(); saveSettings(); };
     $$('[data-rate-i]', el).forEach(inp => inp.onchange = () => { cfg.projects[+inp.dataset.rateI].rate = +inp.value || 0; saved(); toast('Rate saved'); });
     $$('[data-rm-i]', el).forEach(b => b.onclick = () => { cfg.projects.splice(+b.dataset.rmI, 1); saved(); renderSetup(el); toast('Project removed'); });
     $('#addProj').onsubmit = e => {
@@ -3187,12 +3219,13 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
         applyConfig(changedHere ? merge3(state.baseConfig, clone(state.config), theirs) : theirs);
         db.base = config.savedAt; state.baseConfig = clone(theirs);
         if (changedHere) saveSettings();
-        if (stable([state.config.projects, state.settings.projects]) !== before) { state.inv = null; redraw = true; }
+        if (stable([state.config.projects, state.settings.projects]) !== before) { refreshInv(); redraw = true; }
         if (['setup', 'dashboard'].includes(state.view)) redraw = true;
       }
       // timesheet entries: pick up changes made elsewhere (a client merged, or entries edited on another device)
-      const fresh = res.entries || [];
-      if (stable(fresh) !== stable(state.data.rows) && !state.editing) { setRows(fresh); state.inv = null; redraw = true; }
+      // compare like with like: sorted, with the landscaping mileage rate applied
+      const fresh = (res.entries || []).map(r => landKm(clone(r))).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      if (stable(fresh) !== stable(state.data.rows) && !state.editing) { setRows(fresh); redraw = true; }
       if (redraw && !state.editing) route();
     } catch { /* offline: the next save will sort it out */ }
   });
