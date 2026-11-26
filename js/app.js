@@ -510,6 +510,11 @@
       const b = (state.settings.payables || []).find(x => x.id === btn.dataset.appaid); if (!b) return;
       b.paid = todayISO(); saveSettings(); renderDashboard(el); toast(`${b.supplier} ${b.number} marked paid`);
     });
+    $('#apPaid')?.addEventListener('toggle', e => { state.apShowPaid = e.target.open; });
+    $$('[data-apunpaid]', el).forEach(btn => btn.onclick = () => {
+      const b = (state.settings.payables || []).find(x => x.id === btn.dataset.apunpaid); if (!b) return;
+      delete b.paid; saveSettings(); renderDashboard(el); toast(`${b.supplier} ${b.number} is back on the list to pay`);
+    });
     $$('[data-apdel]', el).forEach(btn => btn.onclick = () => {
       if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Confirm'; setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.innerHTML = '&times;'; } }, 4000); return; }
       state.settings.payables = (state.settings.payables || []).filter(x => x.id !== btn.dataset.apdel); saveSettings(); renderDashboard(el); toast('Bill deleted');
@@ -634,6 +639,11 @@
   }
   function payablesHTML() {
     const list = (state.settings.payables || []).filter(b => !b.paid).sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
+    const paid = (state.settings.payables || []).filter(b => b.paid).sort((a, b) => String(b.paid).localeCompare(String(a.paid)));
+    const paidHTML = paid.length ? `<details class="no-print" style="margin-top:10px"${state.apShowPaid ? ' open' : ''} id="apPaid"><summary class="note" style="cursor:pointer">Paid bills (${paid.length})</summary>
+      <div class="table-wrap"><table><thead><tr><th>Supplier</th><th>Invoice</th><th class="num">Amount</th><th>Marked paid</th><th></th></tr></thead>
+      <tbody>${paid.map(b => `<tr><td>${esc(b.supplier)}</td><td>${esc(b.number)}</td><td class="num">${money(+b.total || 0)}</td><td>${typeof b.paid === 'string' && /^\d{4}-/.test(b.paid) ? C.fmtDateNZ(b.paid) : ''}</td>
+        <td><button class="btn btn-small btn-quiet" data-apunpaid="${esc(b.id)}" title="Put this bill back on the list to pay">Undo</button></td></tr>`).join('')}</tbody></table></div></details>` : '';
     const t = todayISO(), days = d => Math.round((Date.parse(t) - Date.parse(d)) / 86400000);
     const head = `<div class="panel-head" style="margin-top:22px"><h2>Accounts payable</h2><button class="btn btn-small btn-quiet" id="apAddBtn" type="button">${state.apAdd ? 'Close' : '+ Add bill'}</button></div>`;
     const form = state.apAdd ? `<form id="apForm" class="no-print" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 14px;padding:10px;border:1px solid var(--line);border-radius:8px">
@@ -644,7 +654,7 @@
         <label class="field"><span>Due date</span><input type="date" id="apDue" value="${t}" required></label>
         <div><button class="btn btn-small" type="submit">Add</button></div>
       </form>` : '';
-    if (!list.length) return head + form + '<p class="muted">No supplier invoices waiting to be paid.</p>';
+    if (!list.length) return head + form + '<p class="muted">No supplier invoices waiting to be paid.</p>' + paidHTML;
     const tot = list.reduce((a, b) => a + (+b.total || 0), 0), over = list.filter(b => b.dueDate && days(b.dueDate) > 0).reduce((a, b) => a + (+b.total || 0), 0);
     return head + form + `<div class="table-wrap"><table>
       <thead><tr><th>Supplier</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th><th></th></tr></thead>
@@ -657,7 +667,7 @@
         <td style="white-space:nowrap"><button class="btn btn-small btn-quiet" data-appaid="${esc(b.id)}" title="Record that this has been paid">Paid</button>
           <button class="btn btn-small btn-danger" data-apdel="${esc(b.id)}" title="Delete this bill">&times;</button></td></tr>`; }).join('')}</tbody>
       <tfoot><tr><td colspan="3">Total to pay (incl GST)${over ? `<div class="muted" style="font-size:.75rem;font-weight:400">Overdue ${money(over)}</div>` : ''}</td><td class="num">${money(tot)}</td><td colspan="2"></td></tr></tfoot>
-    </table></div>`;
+    </table></div>` + paidHTML;
   }
 
   // Months before the current one that can still hold uninvoiced work (from the app's start date)
