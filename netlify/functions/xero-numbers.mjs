@@ -1,7 +1,8 @@
 import { session, xeroApi, json } from './_xero.mjs';
 
 // GET /api/xero-numbers?from=YYYY-MM-DD&to=YYYY-MM-DD
-//   -> { invoices: [{ invoiceId, number, contactId, contactName, reference, date, total, status }], next: 'INV-0530' }
+//   -> { invoices: [{ invoiceId, number, contactId, contactName, reference, date, dueDate, total, amountDue, status }], next: 'INV-0530' }
+// &unpaid=1 also returns unpaid: every approved sales invoice with money still owing, whatever its date.
 // Sales invoices dated in the range (so the app can show the real Xero number on a schedule), plus the next free number.
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const dt = s => { const [y, m, d] = s.split('-').map(Number); return `DateTime(${y},${m},${d})`; };
@@ -14,14 +15,19 @@ export default async (req) => {
   try {
     const t = await session();
     const where = encodeURIComponent(`Type=="ACCREC" AND Date>=${dt(from)} AND Date<=${dt(to)}`);
-    const [inRange, latest] = await Promise.all([
+    const wantUnpaid = u.searchParams.get('unpaid') === '1';
+    const [inRange, latest, owing] = await Promise.all([
       xeroApi(t, `/Invoices?where=${where}&Statuses=DRAFT,SUBMITTED,AUTHORISED,PAID&summaryOnly=true`),
-      xeroApi(t, `/Invoices?where=${encodeURIComponent('Type=="ACCREC"')}&order=${encodeURIComponent('InvoiceNumber DESC')}&summaryOnly=true&page=1&pageSize=10`)
+      xeroApi(t, `/Invoices?where=${encodeURIComponent('Type=="ACCREC"')}&order=${encodeURIComponent('InvoiceNumber DESC')}&summaryOnly=true&page=1&pageSize=10`),
+      wantUnpaid ? xeroApi(t, `/Invoices?where=${encodeURIComponent('Type=="ACCREC" AND AmountDue>0')}&Statuses=AUTHORISED&summaryOnly=true`) : null
     ]);
-    const invoices = (inRange.Invoices || []).filter(i => i.InvoiceNumber).map(i => ({
+    const row = i => ({
       invoiceId: i.InvoiceID, number: i.InvoiceNumber, contactId: i.Contact?.ContactID || '', contactName: i.Contact?.Name || '',
-      reference: i.Reference || '', date: iso(i.DateString || i.Date), total: i.Total, status: i.Status
-    })).sort((a, b) => a.number.localeCompare(b.number));
+      reference: i.Reference || '', date: iso(i.DateString || i.Date), dueDate: iso(i.DueDateString || i.DueDate),
+      total: i.Total, amountDue: i.AmountDue, status: i.Status
+    });
+    const invoices = (inRange.Invoices || []).filter(i => i.InvoiceNumber).map(row).sort((a, b) => a.number.localeCompare(b.number));
+    const unpaid = owing ? (owing.Invoices || []).filter(i => i.InvoiceNumber && +i.AmountDue > 0).map(row).sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.number.localeCompare(b.number)) : undefined;
     // next number = highest INV-nnnn + 1
     let best = null;
     for (const i of latest.Invoices || []) {
@@ -29,6 +35,6 @@ export default async (req) => {
       if (!best || +m[2] > best.n) best = { pre: m[1], n: +m[2], w: m[2].length };
     }
     const next = best ? best.pre + String(best.n + 1).padStart(best.w, '0') : '';
-    return json({ invoices, next });
+    return json({ invoices, next, ...(unpaid ? { unpaid } : {}) });
   } catch (e) { return json({ error: e.message }, 502); }
 };
