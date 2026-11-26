@@ -2242,7 +2242,7 @@
             <div class="paper${inv.sf ? ' sf' : ''}" id="scheduleDoc">
               <div class="doc-head">
                 <div><div class="org">Greenspace Consulting Limited</div><div style="font-size:.85rem;color:#5d6a61">stu@greenspaceconsulting.co.nz</div></div>
-                <div><div class="doc-title">Schedule of Hours</div><div style="font-size:.85rem;color:#5d6a61;text-align:right">Supporting document${m.number ? ' for invoice ' + esc(m.number) : ''}</div></div>
+                <div><div class="doc-title">Schedule of Works</div><div style="font-size:.85rem;color:#5d6a61;text-align:right">Supporting document${m.number ? ' for invoice ' + esc(m.number) : ''}</div></div>
               </div>
               <div class="doc-meta">
                 <div><span>Client</span>${esc(m.contactName)}</div>
@@ -2469,7 +2469,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
   }
   function pdfName() {
     const m = state.inv.meta; const [y, mo] = state.inv.end.split('-');
-    return `Schedule ${m.number ? m.number + ' ' : ''}${m.contactName} ${C.MONTHS[+mo - 1]} ${y}.pdf`.replace(/[\\/:*?"<>|]/g, '');
+    return `Schedule of Works ${m.number ? m.number + ' ' : ''}${m.contactName} ${C.MONTHS[+mo - 1]} ${y}.pdf`.replace(/[\\/:*?"<>|]/g, '');
   }
   // ----- PDF font: Source Sans 3 (handles macrons such as Tātaki). Built-in Helvetica cannot. -----
   const PDF_FONTS = { regular: null, bold: null };
@@ -2499,7 +2499,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     return 'helvetica';
   }
 
-  // ----- Schedule of Hours PDF (built directly with jsPDF + AutoTable: real text, clean page breaks) -----
+  // ----- Schedule of Works PDF (built directly with jsPDF + AutoTable: real text, clean page breaks) -----
   function buildSchedulePDF() {
     const { jsPDF } = window.jspdf;
     const inv = state.inv, m = inv.meta, comp = computeInv();
@@ -2523,7 +2523,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
     doc.setFont(F, 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
     doc.text('stu@greenspaceconsulting.co.nz', M, 23);
     doc.setFont(F, 'bold'); doc.setFontSize(13); doc.setTextColor(...ink);
-    doc.text('Schedule of Hours', W - M, 18, { align: 'right' });
+    doc.text('Schedule of Works', W - M, 18, { align: 'right' });
     doc.setFont(F, 'normal'); doc.setFontSize(9); doc.setTextColor(...grey);
     doc.text('Supporting document' + (m.number ? ' for invoice ' + m.number : ''), W - M, 23, { align: 'right' });
     doc.setDrawColor(...green); doc.setLineWidth(0.8); doc.line(M, 27, W - M, 27);
@@ -3157,7 +3157,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
           <label class="field"><span>Consultant name on invoice lines</span><input type="text" id="sConsultant" value="${esc(s.consultant)}"></label>
           <label class="field"><span>Next invoice number</span><input type="text" id="sNext" value="${esc(s.nextInvoiceNumber)}"></label>
           <label class="field"><span>Sales account code</span><input type="text" id="sAcct" value="${esc(s.accountCode)}"></label>
-          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sAttach" ${s.attachPdf ? 'checked' : ''}> Attach the Schedule of Hours PDF to Xero drafts</label>
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sAttach" ${s.attachPdf ? 'checked' : ''}> Attach the Schedule of Works PDF to Xero drafts</label>
           <label class="field"><span>Not invoiced (internal time), comma separated</span><input type="text" id="sNonBill" value="${esc(s.nonBillable.join(', '))}"></label>
           <h3 style="margin-top:6px">Xero contacts</h3>
           <div class="table-wrap"><table><thead><tr><th>Name</th><th>Contact ID</th></tr></thead>
