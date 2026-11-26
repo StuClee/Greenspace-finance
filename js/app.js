@@ -559,12 +559,36 @@
     state.niXero = Object.assign({}, x, { loading: true });
     try {
       const from = C.monthStart(C.monthKey(state.settings.fromDate || '2026-09-01')), to = todayISO();
-      const r = await fetch(`/api/xero-numbers?from=${from}&to=${to}`, { headers: { accept: 'application/json' } });
+      const r = await fetch(`/api/xero-numbers?from=${from}&to=${to}&unpaid=1`, { headers: { accept: 'application/json' } });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || j.error) throw new Error(j.error || 'Xero ' + r.status);
-      state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED') };
+      state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED'), unpaid: j.unpaid || null };
     } catch (e) { state.niXero = { at: Date.now(), error: e.message }; }
     if (redraw && state.view === 'dashboard') redraw();
+  }
+
+  // Work invoiced but not yet paid: approved Xero invoices with money still owing, oldest due first
+  function unpaidHTML() {
+    const xs = state.niXero || {};
+    const head = '<div class="panel-head" style="margin-top:22px"><h2>Work invoiced not paid</h2><span class="note">From Xero</span></div>';
+    if (xs.loading && !xs.invoices) return head + '<p class="note">Checking Xero...</p>';
+    if (xs.error) return head + `<p class="note">Could not read Xero (${esc(xs.error)}).</p>`;
+    if (!xs.unpaid) return head + '<p class="note">Upload the updated xero-numbers function to see unpaid invoices here.</p>';
+    if (!xs.unpaid.length) return head + '<p class="muted">Every invoice in Xero has been paid.</p>';
+    const t = todayISO(), dayMs = 86400000;
+    const days = d => Math.round((Date.parse(t) - Date.parse(d)) / dayMs);
+    const tot = xs.unpaid.reduce((a, i) => a + (+i.amountDue || 0), 0);
+    const over = xs.unpaid.filter(i => i.dueDate && days(i.dueDate) > 0).reduce((a, i) => a + (+i.amountDue || 0), 0);
+    return head + `<div class="table-wrap"><table>
+      <thead><tr><th>Customer</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th></tr></thead>
+      <tbody>${xs.unpaid.map(i => { const d = i.dueDate ? days(i.dueDate) : null; return `<tr>
+        <td>${esc(i.contactName)}${i.reference ? `<div class="muted mono" style="font-size:.75rem">${esc(i.reference)}</div>` : ''}</td>
+        <td style="white-space:nowrap">${esc(i.number)}<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(i.date)}</div></td>
+        <td style="white-space:nowrap">${i.dueDate ? C.fmtDateNZ(i.dueDate) : '-'}</td>
+        <td class="num">${money(+i.amountDue || 0)}${+i.amountDue < +i.total ? `<div class="muted" style="font-size:.75rem">of ${money(+i.total)}</div>` : ''}</td>
+        <td class="num">${d === null ? '' : d > 0 ? `<span style="color:#b3412f;font-weight:600">${d}</span>` : d === 0 ? 'Due today' : `<span class="muted">due in ${-d}</span>`}</td></tr>`; }).join('')}</tbody>
+      <tfoot><tr><td colspan="3">Total owing (incl GST)${over ? `<div class="muted" style="font-size:.75rem;font-weight:400">Overdue ${money(over)}</div>` : ''}</td><td class="num">${money(tot)}</td><td></td></tr></tfoot>
+    </table></div>`;
   }
 
   // Months before the current one that can still hold uninvoiced work (from the app's start date)
@@ -616,7 +640,7 @@
         <div style="display:flex;gap:8px;align-items:flex-end"><button class="btn btn-small" type="submit">Add</button><button class="btn btn-small btn-quiet" type="button" id="niCancel">Cancel</button></div>
       </form>` : '';
     const addBtn = `<div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn btn-small btn-quiet" id="niAddBtn" type="button">${state.niAdd ? 'Close' : '+ Add item'}</button></div>`;
-    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn + matchedHTML;
+    if (!list.length) return head + form + `<p class="muted">All billable work before ${C.monthLabel(curMk)} has been invoiced.</p>` + addBtn + matchedHTML + unpaidHTML();
     const tH = list.reduce((a, c) => a + c.hours, 0), tA = list.reduce((a, c) => a + c.amt, 0);
     const rowHTML = r => r.item ? `<tr>
             <td style="padding-left:14px">${C.monthLabel(r.mk)}</td>
@@ -633,7 +657,7 @@
         <thead><tr><th>Customer / month</th><th>Work</th><th class="num">Hours</th><th class="num">Excl GST</th><th></th></tr></thead>
         <tbody>${list.map(c => `<tr style="background:var(--paper-2, rgba(0,0,0,.03))"><td colspan="2"><strong>${esc(c.contact)}</strong></td><td class="num"><strong>${hrs(c.hours)}</strong></td><td class="num"><strong>${money(c.amt)}</strong></td><td></td></tr>${c.rows.map(rowHTML).join('')}`).join('')}</tbody>
         <tfoot><tr><td colspan="2">Total not invoiced</td><td class="num">${hrs(tH)}</td><td class="num">${money(tA)}</td><td></td></tr></tfoot>
-      </table></div>` + addBtn + matchedHTML;
+      </table></div>` + addBtn + matchedHTML + unpaidHTML();
   }
 
   function drawDashboardCharts(s, months, isCurrent) {
