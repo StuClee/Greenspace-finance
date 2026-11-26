@@ -501,7 +501,7 @@
     $('#apForm')?.addEventListener('submit', e => {
       e.preventDefault();
       const total = parseFloat($('#apTotal').value);
-      const b = { id: C.uid(), supplier: $('#apSupplier').value.trim(), number: $('#apNumber').value.trim(), date: $('#apDate').value, dueDate: $('#apDue').value, total: isFinite(total) ? C.round2(total) : 0, note: $('#apNote').value.trim() };
+      const b = { id: C.uid(), supplier: $('#apSupplier').value.trim(), number: $('#apNumber').value.trim(), date: $('#apDate').value, dueDate: $('#apDue').value, total: isFinite(total) ? C.round2(total) : 0 };
       if (!b.supplier || !b.number || !b.dueDate) { toast('Enter the supplier, invoice number and due date.'); return; }
       state.settings.payables = state.settings.payables || []; state.settings.payables.push(b);
       state.apAdd = false; saveSettings(); renderDashboard(el); toast('Bill added');
@@ -632,7 +632,6 @@
         <label class="field"><span>Amount incl GST</span><input type="number" id="apTotal" step="0.01" required></label>
         <label class="field"><span>Invoice date</span><input type="date" id="apDate" value="${t}"></label>
         <label class="field"><span>Due date</span><input type="date" id="apDue" value="${t}" required></label>
-        <label class="field" style="grid-column:1/-1"><span>Note (optional)</span><input type="text" id="apNote"></label>
         <div><button class="btn btn-small" type="submit">Add</button></div>
       </form>` : '';
     if (!list.length) return head + form + '<p class="muted">No supplier invoices waiting to be paid.</p>';
@@ -640,7 +639,7 @@
     return head + form + `<div class="table-wrap"><table>
       <thead><tr><th>Supplier</th><th>Invoice</th><th>Due date</th><th class="num">Amount due</th><th class="num">Days overdue</th><th></th></tr></thead>
       <tbody>${list.map(b => { const d = b.dueDate ? days(b.dueDate) : null; return `<tr>
-        <td>${esc(b.supplier)}${b.note ? `<div class="muted" style="font-size:.75rem">${esc(b.note)}</div>` : ''}${b.bank ? `<div class="muted mono" style="font-size:.72rem">Pay ${esc(b.bank)}${b.payRef ? ' · ref ' + esc(b.payRef) : ''}</div>` : ''}</td>
+        <td>${esc(b.supplier)}${b.bank ? `<div class="muted mono" style="font-size:.72rem">Pay ${esc(b.bank)}${b.payRef ? ' · ref ' + esc(b.payRef) : ''}</div>` : ''}</td>
         <td style="white-space:nowrap">${esc(b.number)}${b.date ? `<div class="muted" style="font-size:.75rem">${C.fmtDateNZ(b.date)}</div>` : ''}</td>
         <td style="white-space:nowrap">${b.dueDate ? C.fmtDateNZ(b.dueDate) : '-'}</td>
         <td class="num">${money(+b.total || 0)}</td>
