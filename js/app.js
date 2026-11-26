@@ -484,7 +484,7 @@
       saveSettings(); renderDashboard(el); toast('Marked as invoiced');
     });
     // Xero check for the not-invoiced list
-    loadNiXero(() => renderDashboard(el));
+    loadNiXero(() => { if (state.view === 'dashboard') renderDashboard(el); });
     $('#niMatched')?.addEventListener('toggle', e => { state.niShowMatched = e.target.open; });
     $$('[data-unmatch]', el).forEach(b => b.onclick = () => {
       const [key, num] = JSON.parse(b.dataset.unmatch);
@@ -577,9 +577,12 @@
       .sort((a, b) => a.date.localeCompare(b.date) || a.number.localeCompare(b.number))[0] || null;
   }
   const niKey = (mk, gx) => [mk, gx.client, gx.projects.slice().sort().join('+')].join('|');
+  const niWaiters = new Set();
   async function loadNiXero(redraw) {
     const x = state.niXero;
-    if (x && (x.loading || Date.now() - x.at < 5 * 60 * 1000)) return;
+    if (x && x.loading) { if (redraw) niWaiters.add(redraw); return; }
+    if (x && Date.now() - x.at < 5 * 60 * 1000) return;
+    if (redraw) niWaiters.add(redraw);
     state.niXero = Object.assign({}, x, { loading: true });
     try {
       const from = C.monthStart(C.monthKey(state.settings.fromDate || '2026-09-01')), to = todayISO();
@@ -588,7 +591,7 @@
       if (!r.ok || j.error) throw new Error(j.error || 'Xero ' + r.status);
       state.niXero = { at: Date.now(), invoices: (j.invoices || []).filter(i => i.status !== 'VOIDED' && i.status !== 'DELETED'), unpaid: j.unpaid || null };
     } catch (e) { state.niXero = { at: Date.now(), error: e.message }; }
-    if (redraw && state.view === 'dashboard') redraw();
+    const ws = [...niWaiters]; niWaiters.clear(); ws.forEach(f => { try { f(); } catch (e) { console.warn(e); } });
   }
 
   // Work invoiced but not yet paid: approved Xero invoices with money still owing, oldest due first
@@ -947,6 +950,8 @@
         ${kpi('Working capital', pos.wc[0], pos.wc[1], { sub: 'Bank + current assets - current liabilities' })}
       </div>` : ''}
 
+      <div class="panel" id="cfPanel"></div>
+
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head"><h2>Cumulative revenue</h2>
@@ -995,6 +1000,7 @@
     $$('[data-pnl-all]', el).forEach(b => b.onclick = () => { P.allLines = !P.allLines; renderPerformance(el); });
     if ($('#payRetry')) $('#payRetry').onclick = () => { state.perf.payroll.error = null; route(); };
     drawPerfCharts(M, X);
+    renderCashflow($('#cfPanel', el));
   }
   function reconnectHTML(msg, back = 'performance') {
     return `<div class="panel"><h2>Allow Xero reports</h2>
@@ -1007,6 +1013,241 @@
   function wirePerfHead(el) {
     $$('[data-pmode]', el).forEach(b => b.onclick = () => { state.perf.mode = b.dataset.pmode; state.perf.error = null; renderPerformance(el); });
     $('#pRefresh', el).onclick = () => { delete state.perf.cache[perfAsAt(state.perf.mode)]; state.perf.payroll = { cache: {}, loading: false, error: null }; loadPerf(true); route(); };
+  }
+
+  // ======================================================================
+  // 13-WEEK CASHFLOW (Performance page)
+  // Opening cash from the Xero balance sheet today; receipts from Xero debtors, work not yet invoiced and
+  // the monthly targets; payments from accounts payable, the wages plan, IRD dates (Tax page) and regular
+  // payments. Any cell can be overridden and one-off items added; all kept in settings.cashflow.
+  // ======================================================================
+  const CF_WEEKS = 13;
+  const CF_REGULAR_SEED = [
+    { name: 'LC Commerce (sub-contractor)', amount: 2300, day: 21 },
+    { name: 'smartAR', amount: 325.58, day: 23 },
+    { name: 'BizCover', amount: 114.52, day: 4 },
+    { name: 'BizCover', amount: 38.43, day: 29 },
+    { name: 'AMI Business', amount: 98.36, day: 20 },
+    { name: 'AMI', amount: 56.67, day: 25 },
+    { name: 'Westpac fee', amount: 7, day: 2 }
+  ];
+  function cfSettings() {
+    const s = state.settings;
+    s.cashflow = Object.assign({ over: {}, oneoffs: [], regular: null, wagesWhen: 'monthEnd' }, s.cashflow || {});
+    if (!Array.isArray(s.cashflow.regular)) s.cashflow.regular = CF_REGULAR_SEED.map(r => ({ id: C.uid(), freq: 'monthly', ...r }));
+    return s.cashflow;
+  }
+  const cfLoad = { tax: false };
+  function cfEnsureData(redraw) {
+    if (!state.tax.data && !state.tax.loading && !state.tax.error && !cfLoad.tax) {
+      cfLoad.tax = true;
+      loadTax().then(() => { cfLoad.tax = false; redraw(); });
+    }
+    loadNiXero(redraw);
+  }
+  // Last working day of a month (wages)
+  function lastWorkingDay(mk) { let d = C.monthEnd(mk); while (C.weekday(d) % 6 === 0 || TAX_HOLIDAYS.has(d)) d = C.addDays(d, -1); return d; }
+  function cfModel() {
+    const cf = cfSettings(), today = nzToday();
+    const wd = C.weekday(today);                                 // 0 Sun .. 6 Sat
+    const start0 = C.addDays(today, -((wd + 6) % 7));            // Monday of this week
+    const weeks = Array.from({ length: CF_WEEKS }, (_, i) => { const s = C.addDays(start0, i * 7); return { start: s, end: C.addDays(s, 6) }; });
+    const lastDay = weeks[CF_WEEKS - 1].end;
+    const wi = d => { if (!d) return -1; if (d < weeks[0].start) return 0; if (d > lastDay) return -1; return Math.floor(daysTo(d, start0) / 7); };
+    const lines = {};
+    const line = (key, label, dir, note) => (lines[key] = { key, label, dir, note, calc: Array(CF_WEEKS).fill(0), items: Array.from({ length: CF_WEEKS }, () => []) });
+    const put = (key, d, amt, what) => { const i = wi(d); if (i < 0 || !amt) return; lines[key].calc[i] += amt; lines[key].items[i].push(`${what}: ${money(amt)}${d < today ? ' (overdue)' : ''}`); };
+    const X = state.tax.data, xs = state.niXero || {};
+    const opening = X && X.bs && isFinite(X.bs.bank) ? X.bs.bank : null;
+
+    // ----- receipts
+    line('debtors', 'Customers: invoices in Xero', 'in', 'Unpaid Xero invoices, on their due date (overdue ones this week)');
+    for (const i of xs.unpaid || []) put('debtors', i.dueDate || today, +i.amountDue || 0, `${i.number} ${i.contactName}`);
+    line('toInvoice', 'Customers: work not yet invoiced', 'in', 'Earlier months not invoiced, invoiced now and paid on the client\'s terms, incl GST');
+    const curMk = C.monthKey(today);
+    if (state.data) {
+      const unmatch = state.settings.xeroUnmatch || {};
+      for (const mk of nonCurrentMonths(curMk)) for (const gx of invoiceGroups(mk)) {
+        if (isInvoiced(mk, gx.client, gx.projects)) continue;
+        const m = xeroMatch(gx); if (m && unmatch[niKey(mk, gx)] !== m.number) continue;
+        const due = C.dueDateFor(today, billingFor(gx.client, gx.projects[0]).due);
+        put('toInvoice', due < today ? today : due, C.round2((gx.amount + gx.kmAmt) * 1.15), `${gx.contact} ${C.monthLabel(mk)}`);
+      }
+      for (const it of state.settings.pendingItems || []) if (!it.done) put('toInvoice', C.dueDateFor(today, '20th'), C.round2((+it.amount || 0) * 1.15), `${it.contact}: ${it.description}`);
+    }
+    line('billings', 'Customers: forecast billings', 'in', 'This month: the larger of timesheet to date and the target, less what is already invoiced in Xero; later months: the monthly target. Invoiced at month end, paid on the 20th of the next month, incl GST');
+    if (state.data) {
+      const T = state.data.targets || {};
+      for (let mk = curMk; C.dueDateFor(C.monthEnd(mk), '20th') <= lastDay; mk = C.addMonths(mk, 1)) {
+        const target = (T[mk] && T[mk].target) || 0;
+        let excl = target;
+        if (mk === curMk) {
+          const done = state.data.rows.filter(r => C.monthKey(r.date) === mk && isBillable(r.client)).reduce((a, r) => a + (r.amount || 0) + (r.kmAmt || 0), 0);
+          const invoiced = (xs.invoices || []).filter(i => C.monthKey(i.date) === mk).reduce((a, i) => a + (+i.total || 0) / 1.15, 0);
+          excl = Math.max(0, Math.max(done, target) - invoiced);
+        }
+        put('billings', C.dueDateFor(C.monthEnd(mk), '20th'), C.round2(excl * 1.15), `${C.monthLabel(mk)} billings ${money(excl)} + GST`);
+      }
+    }
+    // ----- payments
+    line('suppliers', 'Suppliers (accounts payable)', 'out', 'Unpaid bills on the Dashboard, on their due date (overdue ones this week)');
+    for (const b of state.settings.payables || []) if (!b.paid) put('suppliers', b.dueDate || today, +b.total || 0, `${b.supplier} ${b.number}`);
+    line('wages', 'Wages (net pay)', 'out', 'FY27 wages plan less PAYE and employee KiwiSaver, paid on the last working day of the month');
+    line('ird', 'Inland Revenue (GST, PAYE, income tax)', 'out', 'Due dates and amounts from the Tax page; overdue ones this week');
+    if (X) {
+      let TM = null; try { TM = taxModel(X); } catch (e) { console.warn('tax model', e); }
+      if (TM) {
+        for (const r of TM.paye) {
+          const pay = lastWorkingDay(r.mk); if (pay < today) continue;
+          const net = C.round2(r.stu + r.rachel - r.stuPaye - r.rPaye - r.ks);
+          put('wages', pay, net, `${C.monthLabel(r.mk)} pay (gross ${money(r.stu + r.rachel)})`);
+        }
+        for (const e of TM.upcoming) if (!e.paid && e.amount > 0) put('ird', e.date, e.amount, e.what);
+      }
+    }
+    line('regular', 'Regular payments', 'out', 'Set up below');
+    for (const r of cf.regular) {
+      if (!(+r.amount)) continue;
+      for (let mk = C.monthKey(weeks[0].start); C.monthStart(mk) <= lastDay; mk = C.addMonths(mk, 1)) {
+        const dim = +C.monthEnd(mk).slice(8), d = `${mk}-${C.pad(Math.min(+r.day || 1, dim))}`;
+        if (d >= today) put('regular', d, +r.amount, r.name);
+      }
+    }
+    line('oneIn', 'One-off receipts', 'in', 'Added below');
+    line('oneOut', 'One-off payments', 'out', 'Added below');
+    for (const o of cf.oneoffs) { const a = +o.amount || 0; if (a) put(a > 0 ? 'oneIn' : 'oneOut', o.date, Math.abs(a), o.desc || 'One-off'); }
+
+    // ----- apply overrides, then totals
+    const val = (k, i) => { const o = cf.over[k + '|' + weeks[i].start]; return o != null && o !== '' ? +o : C.round2(lines[k].calc[i]); };
+    const ins = Object.values(lines).filter(l => l.dir === 'in'), outs = Object.values(lines).filter(l => l.dir === 'out');
+    const tIn = weeks.map((_, i) => ins.reduce((a, l) => a + val(l.key, i), 0));
+    const tOut = weeks.map((_, i) => outs.reduce((a, l) => a + val(l.key, i), 0));
+    const open = [], close = [];
+    let bal = opening || 0;
+    weeks.forEach((_, i) => { open.push(bal); bal = C.round2(bal + tIn[i] - tOut[i]); close.push(bal); });
+    const lowI = close.reduce((m, v, i) => v < close[m] ? i : m, 0);
+    return { cf, today, weeks, lines, ins, outs, val, tIn, tOut, open, close, opening, lowI, X, xs };
+  }
+
+  function cashflowHTML() {
+    const cf = cfSettings();
+    const X = state.tax.data, xs = state.niXero || {};
+    const loading = (!X && (state.tax.loading || cfLoad.tax)) || (!xs.invoices && xs.loading);
+    const head = `<style>
+      .cf-table{font-size:.8rem}.cf-table td,.cf-table th{padding:4px 5px;white-space:nowrap}
+      .cf-table td:first-child{position:sticky;left:0;background:var(--panel,#fff);min-width:15em;white-space:normal;z-index:1}
+      .cf-table input.cf-in{width:5.6em;min-width:0;height:auto;text-align:right;border:1px solid transparent;background:transparent;padding:2px 3px;font:inherit;border-radius:4px;box-shadow:none}
+      .cf-table input.cf-in:hover,.cf-table input.cf-in:focus{border-color:var(--line);background:#fff}.cf-table input.cf-in.edited{background:#fff4d6;border-color:#e3c46b}
+      .cf-sec td{font-weight:700;color:var(--muted);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em;padding-top:10px}
+      .cf-bal td{border-top:2px solid var(--line)}
+      </style><div class="panel-head"><h2>Cashflow: next 13 weeks</h2><span class="note">Weekly, incl GST</span></div>`;
+    if (!X) {
+      if (loading || !state.tax.error) return head + '<p class="muted">Getting the bank balance and tax dates from Xero ...</p>';
+      return head + `<div class="callout">Could not read Xero for the cashflow: ${esc(state.tax.error.message || String(state.tax.error))}</div>`;
+    }
+    const M = cfModel(), W = M.weeks;
+    const wk = w => { const d = C.parseISO(w.start); return `${d.getUTCDate()} ${C.MONTHS[d.getUTCMonth()]}`; };
+    const cell = (l, i) => {
+      const k = l.key + '|' + W[i].start, o = cf.over[k], v = M.val(l.key, i), tip = l.items[i].join('\n') + (o != null && o !== '' ? `\nCalculated: ${money(l.calc[i])}. Clear the box to go back to it.` : '');
+      return `<td class="num"><input type="number" step="1" class="cf-in${o != null && o !== '' ? ' edited' : ''}" data-cf="${esc(k)}" value="${v ? Math.round(v) : ''}" placeholder="-" title="${esc(tip || 'Type an amount to override')}" aria-label="${esc(l.label)} week of ${wk(W[i])}"></td>`;
+    };
+    const row = l => `<tr><td title="${esc(l.note)}">${esc(l.label)}</td>${W.map((_, i) => cell(l, i)).join('')}<td class="num"><strong>${money0(W.reduce((a, _, i) => a + M.val(l.key, i), 0))}</strong></td></tr>`;
+    const sumRow = (label, arr, cls = '') => `<tr class="${cls}"><td><strong>${label}</strong></td>${arr.map(v => `<td class="num"><strong>${money0(v)}</strong></td>`).join('')}<td class="num"><strong>${money0(arr.reduce((a, b) => a + b, 0))}</strong></td></tr>`;
+    const balRow = (label, arr) => `<tr class="cf-bal"><td><strong>${label}</strong></td>${arr.map(v => `<td class="num" style="${v < 0 ? 'color:#b3412f;' : ''}font-weight:700">${money0(v)}</td>`).join('')}<td></td></tr>`;
+    const low = M.close[M.lowI], end = M.close[CF_WEEKS - 1];
+    const bankNote = (X.bs.bankAccounts || []).map(a => `${esc(a.name)} ${money(a.v)}`).join(' · ');
+    const regRows = cf.regular.map(r => `<tr><td><input type="text" data-reg="${esc(r.id)}" data-rf="name" value="${esc(r.name)}" aria-label="Payment"></td>
+        <td class="num"><input type="number" step="0.01" data-reg="${esc(r.id)}" data-rf="amount" value="${r.amount}" style="width:7em" aria-label="Amount"></td>
+        <td class="num"><input type="number" min="1" max="31" data-reg="${esc(r.id)}" data-rf="day" value="${r.day}" style="width:4em" aria-label="Day of month"></td>
+        <td><button class="btn btn-small btn-danger" type="button" data-regdel="${esc(r.id)}" aria-label="Remove">&times;</button></td></tr>`).join('');
+    const oneRows = cf.oneoffs.slice().sort((a, b) => a.date.localeCompare(b.date)).map(o => `<tr><td>${C.fmtDateNZ(o.date)}</td><td>${esc(o.desc)}</td><td class="num" style="${o.amount < 0 ? 'color:#b3412f' : ''}">${money(o.amount)}</td><td><button class="btn btn-small btn-danger" type="button" data-onedel="${esc(o.id)}" aria-label="Remove">&times;</button></td></tr>`).join('');
+    return head + `
+      <div class="kpis kpis-quiet" style="margin-bottom:12px">
+        <div class="kpi"><span class="label">Cash at bank today</span><span class="value">${money0(M.opening)}</span><span class="sub">${bankNote || 'From Xero'}</span></div>
+        <div class="kpi"><span class="label">Lowest point</span><span class="value" style="${low < 0 ? 'color:#b3412f' : ''}">${money0(low)}</span><span class="sub">Week of ${wk(W[M.lowI])}</span></div>
+        <div class="kpi"><span class="label">In 13 weeks</span><span class="value" style="${end < 0 ? 'color:#b3412f' : ''}">${money0(end)}</span><span class="sub">Week of ${wk(W[CF_WEEKS - 1])}</span></div>
+        <div class="kpi"><span class="label">Receipts less payments</span><span class="value">${money0(M.tIn.reduce((a, b) => a + b, 0) - M.tOut.reduce((a, b) => a + b, 0))}</span><span class="sub">Over the 13 weeks</span></div>
+      </div>
+      <div class="chart-box"><canvas id="cfChart" aria-label="Closing bank balance by week"></canvas></div>
+      <div class="table-wrap cf-wrap"><table class="cf-table">
+        <thead><tr><th>Week starting</th>${W.map(w => `<th class="num">${wk(w)}</th>`).join('')}<th class="num">Total</th></tr></thead>
+        <tbody>
+          ${balRow('Opening balance', M.open)}
+          <tr class="cf-sec"><td colspan="${CF_WEEKS + 2}">Receipts</td></tr>
+          ${M.ins.map(row).join('')}
+          ${sumRow('Total receipts', M.tIn)}
+          <tr class="cf-sec"><td colspan="${CF_WEEKS + 2}">Payments</td></tr>
+          ${M.outs.map(row).join('')}
+          ${sumRow('Total payments', M.tOut)}
+          ${sumRow('Net cashflow', M.tIn.map((v, i) => v - M.tOut[i]))}
+          ${balRow('Closing balance', M.close)}
+        </tbody>
+      </table></div>
+      <p class="note">Hover over a figure to see what makes it up. Type in any box to override it (shown highlighted); clear the box to go back to the calculated figure.${Object.keys(cf.over).length ? ` <button class="btn btn-small btn-quiet" type="button" id="cfClear">Clear all ${Object.keys(cf.over).length} overrides</button>` : ''}</p>
+      <div class="grid-2" style="margin-top:14px">
+        <div>
+          <h3>One-off items</h3>
+          <form id="cfOneForm" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:6px;align-items:end">
+            <label class="field"><span>Date</span><input type="date" id="cfOneDate" value="${M.today}" required></label>
+            <label class="field"><span>Description</span><input type="text" id="cfOneDesc" required placeholder="e.g. Equipment purchase"></label>
+            <label class="field"><span>Amount</span><input type="number" step="0.01" id="cfOneAmt" required style="width:8em" placeholder="-500 = out"></label>
+            <button class="btn btn-small" type="submit">Add</button>
+          </form>
+          <p class="note">Positive amounts are money in, negative are money out (incl GST).</p>
+          ${oneRows ? `<div class="table-wrap"><table><tbody>${oneRows}</tbody></table></div>` : ''}
+        </div>
+        <div>
+          <h3>Regular payments</h3>
+          <div class="table-wrap"><table><thead><tr><th>Payment</th><th class="num">Amount</th><th class="num">Day</th><th></th></tr></thead><tbody>${regRows}</tbody></table></div>
+          <button class="btn btn-small btn-quiet" type="button" id="cfRegAdd">+ Add regular payment</button>
+          <p class="note">Monthly, on that day of the month (incl GST). Started from the payments seen in Westpac in November; insurance (AIA), power and phone amounts were not known, so add them here.</p>
+        </div>
+      </div>
+      <p class="note">Assumptions: customers pay on the due date; bills are paid on their due date; GST, PAYE and income tax as on the Tax page; wages from the FY27 plan paid at month end (Westpac shows Stu's pay going out weekly, $1,750, so override the wages row if that is how it is paid). Opening cash is the Xero bank balance, so anything not yet reconciled in Xero is not in it.</p>`;
+  }
+
+  function drawCashflowChart(M) {
+    const cv = $('#cfChart'); if (!cv || !window.Chart) return;
+    const line = cssVar('--line'), acc = cssVar('--accent');
+    state.cfChart = new Chart(cv, {
+      type: 'bar',
+      data: { labels: M.weeks.map(w => { const d = C.parseISO(w.start); return `${d.getUTCDate()} ${C.MONTHS[d.getUTCMonth()]}`; }),
+        datasets: [{ label: 'Closing balance', data: M.close, backgroundColor: M.close.map(v => v < 0 ? '#b3412f' : acc), borderRadius: 4, maxBarThickness: 40 }] },
+      options: { maintainAspectRatio: false, animation: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `Closing balance: ${money0(c.parsed.y)}` } } },
+        scales: { x: { grid: { display: false } }, y: { grid: { color: line }, ticks: { callback: v => moneyK(v) } } } }
+    });
+  }
+
+  function renderCashflow(box) {
+    if (!box) return;
+    const redraw = () => { const b = $('#cfPanel'); if (b && state.view === 'performance') { const y = window.scrollY; renderCashflow(b); window.scrollTo({ top: y }); } };
+    cfEnsureData(redraw);
+    if (state.cfChart) { try { state.cfChart.destroy(); } catch { /* canvas already gone */ } state.cfChart = null; }
+    box.innerHTML = cashflowHTML();
+    if (!state.tax.data) return;
+    const cf = cfSettings(), M = cfModel();
+    drawCashflowChart(M);
+    const save = () => { saveSettings(); const y = window.scrollY; renderCashflow(box); window.scrollTo({ top: y }); };
+    $$('[data-cf]', box).forEach(inp => inp.onchange = () => {
+      const k = inp.dataset.cf, [key, ws] = k.split('|'), i = M.weeks.findIndex(w => w.start === ws);
+      const calc = i >= 0 ? Math.round(C.round2(M.lines[key].calc[i])) : 0;
+      if (inp.value === '' || +inp.value === calc) delete cf.over[k]; else cf.over[k] = +inp.value;
+      save();
+    });
+    $('#cfClear', box)?.addEventListener('click', () => { cf.over = {}; save(); toast('Overrides cleared'); });
+    $('#cfOneForm', box)?.addEventListener('submit', e => {
+      e.preventDefault();
+      const amt = parseFloat($('#cfOneAmt', box).value), date = $('#cfOneDate', box).value, desc = $('#cfOneDesc', box).value.trim();
+      if (!date || !desc || !isFinite(amt) || !amt) { toast('Enter a date, a description and an amount.'); return; }
+      cf.oneoffs.push({ id: C.uid(), date, desc, amount: C.round2(amt) }); save(); toast('One-off added');
+    });
+    $$('[data-onedel]', box).forEach(b => b.onclick = () => { cf.oneoffs = cf.oneoffs.filter(o => o.id !== b.dataset.onedel); save(); });
+    $$('[data-reg]', box).forEach(inp => inp.onchange = () => {
+      const r = cf.regular.find(x => x.id === inp.dataset.reg); if (!r) return;
+      const f = inp.dataset.rf; r[f] = f === 'name' ? inp.value.trim() : (+inp.value || 0); save();
+    });
+    $$('[data-regdel]', box).forEach(b => b.onclick = () => { cf.regular = cf.regular.filter(r => r.id !== b.dataset.regdel); save(); });
+    $('#cfRegAdd', box)?.addEventListener('click', () => { cf.regular.push({ id: C.uid(), name: 'New payment', amount: 0, day: 20, freq: 'monthly' }); save(); });
   }
 
   // ---------- wages ----------
