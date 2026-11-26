@@ -314,12 +314,22 @@
     }
     return out;
   }
+  // Landscaping labour: each day's activities in one paragraph, date in brackets after each day
+  function landLabourText(days) {
+    return days.filter(d => d.hours).map(d => `${(d.activityText || 'Labour').trim().replace(/;\s*/g, ', ').replace(/[;,.\s]+$/, '')} (${rangeText(d.date, d.date)})`).join('; ');
+  }
+  // Landscaping vehicle: one line listing each travel date
+  function landVehicleText(days) {
+    const dates = [...new Set(days.filter(d => d.kms).map(d => d.date))].sort();
+    return `Vehicle (${dates.map(x => rangeText(x, x)).join(', ')})`;
+  }
+  // Landscaping invoice: labour and vehicle each as one line, quantity 1 at the total cost
   function landLines(days, mats, opts = {}) {
     const work = days.filter(d => d.hours), kd = days.filter(d => d.kms);
     let id = 1; const lines = [];
     if (mats.length) lines.push({ id: id++, kind: 'mat', project: '', description: opts.matText || 'Plants & Landscaping Materials as per schedule emailed' });
-    if (work.length) lines.push({ id: id++, kind: 'time', project: work[0].project, description: `Labour as per schedule emailed (${rangeText(work[0].date, work[work.length - 1].date)})` });
-    if (kd.length) lines.push({ id: id++, kind: 'vehicle', project: '', description: `Vehicle (${rangeText(kd[0].date, kd[kd.length - 1].date)})` });
+    if (work.length) lines.push({ id: id++, kind: 'time', lump: true, auto: true, project: work[0].project, description: landLabourText(work) });
+    if (kd.length) lines.push({ id: id++, kind: 'vehicle', lump: true, auto: true, project: '', description: landVehicleText(kd) });
     return lines;
   }
 
@@ -342,6 +352,8 @@
       if (l.manualRate) { l.unitAmount = l.manualRate; l.amount = round2((l.quantity || 0) * l.manualRate); }
       else l.unitAmount = l.quantity ? round2(l.amount / l.quantity) : 0;
       l.amount = round2(l.amount);
+      // lump line (landscaping): one unit at the total labour cost; hours kept for the schedule
+      if (l.lump) { l.hours = l.quantity || 0; if (l.amount) { l.quantity = 1; l.unitAmount = l.amount; } }
     }
     for (const l of out.filter(l => l.kind === 'alloc')) {
       let q = 0, amt = 0;
@@ -355,6 +367,7 @@
     if (veh) {
       const kms = days.reduce((s, d) => s + d.kms, 0), amt = days.reduce((s, d) => s + d.kmAmt, 0);
       veh.quantity = kms; veh.unitAmount = kms ? round2(amt / kms) : 0; veh.amount = round2(veh.quantity * veh.unitAmount);
+      if (veh.lump) { veh.kms = kms; veh.amount = round2(amt); veh.quantity = veh.amount ? 1 : 0; veh.unitAmount = veh.amount; }
     }
     // Other (non-labour) project items: quantity and unit price come from the stored item
     for (const l of out.filter(l => l.kind === 'other')) {
@@ -470,7 +483,7 @@
     return [...new Set(data.rows.map(r => monthKey(r.date)))].sort();
   }
 
-  function api() { return { dayTarget, defaultWeight, holidaysIn, NZ_HOLIDAYS, weekdaysIn, matCalc, parseMaterials, landLines, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
+  function api() { return { dayTarget, defaultWeight, holidaysIn, NZ_HOLIDAYS, weekdaysIn, matCalc, parseMaterials, landLines, landLabourText, landVehicleText, SF_CATS, suggestAlloc, allocTotal, sfDescriptions, sfLines, rowsToEntries, makeEntry, rateFor, toMin, uid, timeAdd, pad, iso, parseISO, addDays, monthKey, monthStart, monthEnd, addMonths, weekday, monthLabel, fmtDateNZ, fmtDateLong, rangeText, round2, MONTHS, DAYS, parseWorkbook, categorise, dayBlocks, invoiceDays, defaultLines, computeLines, dueDateFor, xeroPayload, xeroCSV, monthStats, monthsInData, uniqueJoin }; }
   if (typeof module !== 'undefined' && module.exports) module.exports = api();
   else root.GSCore = api();
 })(typeof window !== 'undefined' ? window : globalThis);

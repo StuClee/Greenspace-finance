@@ -1871,6 +1871,11 @@
       const desc = C.sfDescriptions(inv.days, allocFor);
       inv.lines.forEach(l => { if (l.kind === 'alloc' && l.auto) l.description = desc[l.cat]; });
     }
+    if (inv.land) inv.lines.forEach(l => {
+      if (!l.lump || !l.auto) return;
+      if (l.kind === 'time') { const own = inv.lines.filter(t => t.kind === 'time').length > 1 ? inv.days.filter(d => d.hours && (inv.assign[d.key] === l.id || (!inv.assign[d.key] && d.project === l.project))) : inv.days; l.description = C.landLabourText(own); }
+      if (l.kind === 'vehicle') l.description = C.landVehicleText(inv.days);
+    });
     syncOtherLines();
     return C.computeLines(inv.lines, inv.days, inv.assign, allocFor, { matTotal: inv.land ? matSum(includedMats()) : 0, others: Object.fromEntries(includedOthers().map(o => [o.id, o])) });
   }
@@ -1936,13 +1941,24 @@
     if (!list.length) return `<div class="doc-section no-print"><h3>Materials</h3><p class="muted">No uninvoiced materials for ${esc(state.inv.client)} dated ${C.fmtDateNZ(state.inv.start)} to ${C.fmtDateNZ(state.inv.end)}. Add them on the <a href="#landscaping">Landscaping</a> page.</p></div>`;
     const inc = list.filter(m => !off[m.id]);
     return `<div class="doc-section"><h3>Materials</h3><div class="table-wrap"><table>
-      <thead><tr><th class="no-print"></th><th>Month</th><th>Item</th><th>Supplier</th><th>Unit</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+      <thead><tr><th class="no-print"></th><th>Item</th><th>Unit</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
       <tbody>${list.map(m => { const c = C.matCalc(m), isOff = !!off[m.id]; return `<tr class="${isOff ? 'mat-off no-print' : ''}">
         <td class="no-print"><input type="checkbox" data-matoff="${esc(m.id)}" ${isOff ? '' : 'checked'} aria-label="Include ${esc(m.item)}"></td>
-        <td>${C.MONTHS[+m.date.slice(5, 7) - 1]}</td><td>${esc(m.item)}</td><td>${esc(m.supplier)}</td><td>${esc(m.unit)}</td>
+        <td>${esc(m.item)}</td><td>${esc(m.unit)}</td>
         <td class="num">${hrs(m.qty)}</td><td class="num">${money(c.unitPrice)}</td><td class="num">${money(c.total)}</td></tr>`; }).join('')}</tbody>
-      <tfoot><tr><td class="no-print"></td><td colspan="6">Total materials</td><td class="num">${money(matSum(inc))}</td></tr></tfoot>
+      <tfoot><tr><td class="no-print"></td><td colspan="4">Total materials</td><td class="num">${money(matSum(inc))}</td></tr></tfoot>
     </table></div><p class="note no-print">Untick anything that should wait for a later invoice. Unticked items are left off the PDF and the invoice.</p></div>`;
+  }
+
+  // Landscaping: labour or vehicle as single lines (quantity 1 at the total cost)
+  function landLumpHTML(title, lines) {
+    lines = lines.filter(l => l.amount);
+    if (!lines.length) return '';
+    return `<h3 style="margin-bottom:8px">${title}</h3><div class="table-wrap"><table>
+      <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+      <tbody>${lines.map(l => `<tr><td>${esc(l.description)}</td><td class="num">${hrs(l.quantity)}</td><td class="num">${money(l.unitAmount)}</td><td class="num">${money(l.amount)}</td></tr>`).join('')}</tbody>
+      ${lines.length > 1 ? `<tfoot><tr><td colspan="3">Total ${title.toLowerCase()}</td><td class="num">${money(lines.reduce((a, l) => a + l.amount, 0))}</td></tr></tfoot>` : ''}
+    </table></div>`;
   }
 
   // Editable activities cell (screen: text box; PDF/print: plain text)
@@ -2088,7 +2104,7 @@
                 <div><span>Reference</span>${esc(m.reference) || '-'}</div>
                 <div><span>Consultant</span>${esc(state.settings.consultant)}</div>
               </div>
-${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.land ? '<h3 style="margin-bottom:8px">Labour</h3>' : ''}              <div class="table-wrap"><table>
+${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.land ? landLumpHTML('Labour', timeLines) + '<div class="no-print"><p class="note" style="margin:10px 0 6px">Daily wording and hours (not printed). Edit here to change the labour description above.</p>' : ''}              <div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Activities</th><th class="num screen-only">Hours</th><th class="num">Total Hours</th><th class="num">Rate</th><th class="num">Amount</th>${timeLines.length > 1 ? '<th class="no-print">Invoice line</th>' : ''}</tr></thead>
                 <tbody>${workDays.map(x => `<tr>
                   <td style="white-space:nowrap">${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}
@@ -2099,10 +2115,11 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
                   ${timeLines.length > 1 ? `<td class="no-print"><select class="line-sel" data-day="${esc(x.key)}">${timeLines.map(l => `<option value="${l.id}" ${l.dayKeys.includes(x.key) ? 'selected' : ''}>${lineLabel(l)}${l.project && l.project !== '__split' ? ' · ' + esc(l.project) : ''}</option>`).join('')}</select></td>` : ''}
                 </tr>`).join('') || `<tr><td colspan="6" class="muted">No time in this period.</td></tr>`}</tbody>
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total time</td><td class="num screen-only">${hrs(workDays.reduce((a, x) => a + x.hoursRaw, 0))}</td><td class="num">${hrs(workDays.reduce((a, x) => a + x.hours, 0))}</td><td></td><td class="num">${money(workDays.reduce((a, x) => a + x.amount, 0))}</td>${timeLines.length > 1 ? '<td class="no-print"></td>' : ''}</tr></tfoot>
-              </table></div>
+              </table></div>${inv.land ? '</div>' : ''}
 `}
               ${inv.land ? matTableHTML() : ''}
-              ${kmDays.length ? `<div class="doc-section"><h3>Vehicle</h3><div class="table-wrap"><table>
+              ${inv.land && kmDays.length ? `<div class="doc-section">${landLumpHTML('Vehicle', comp.lines.filter(l => l.kind === 'vehicle'))}</div>` : ''}
+              ${kmDays.length && !inv.land ? `<div class="doc-section"><h3>Vehicle</h3><div class="table-wrap"><table>
                 <thead><tr><th>Date</th>${multiProj ? '<th>Project</th>' : ''}<th>Trip</th><th class="num">Km</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
                 <tbody>${kmDays.map(x => `<tr><td>${C.fmtDateNZ(x.date)}</td>${multiProj ? `<td>${esc(x.project)}</td>` : ''}<td>${(() => { const tv = tripFor(x); return `<input type="text" class="trip-in no-print" data-trip="${esc(x.key)}" value="${esc(tv)}" aria-label="Trip ${C.fmtDateNZ(x.date)}"><span class="print-only">${esc(tv) || '-'}</span>`; })()}</td><td class="num">${x.kms}</td><td class="num">${money(x.kms ? x.kmAmt / x.kms : 0)}</td><td class="num">${money(x.kmAmt)}</td></tr>`).join('')}</tbody>
                 <tfoot><tr><td colspan="${multiProj ? 3 : 2}">Total vehicle</td><td class="num">${kmDays.reduce((a, x) => a + x.kms, 0)}</td><td></td><td class="num">${money(kmDays.reduce((a, x) => a + x.kmAmt, 0))}</td></tr></tfoot>
@@ -2142,7 +2159,7 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
                   <textarea rows="${l.kind === 'heading' ? 3 : 2}" data-desc="${i}" aria-label="Description line ${i + 1}">${esc(l.description)}</textarea></td>
                 ${l.kind === 'heading' ? '<td colspan="5" class="muted" style="font-size:.8rem">Description only</td>' : `
                 <td class="num">${l.kind === 'manual' ? `<input type="number" step="0.01" data-qty="${i}" value="${l.quantity0 ?? ''}">` : l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="qty" value="${l.quantity}" aria-label="Quantity">` : hrs(l.quantity)}</td>
-                <td class="num">${l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="unit" value="${l.unitAmount}" aria-label="Unit price">` : l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : (l.kind === 'time' || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
+                <td class="num">${l.kind === 'other' ? `<input type="number" step="0.01" class="other-in" data-o="${esc(l.itemId)}" data-of="unit" value="${l.unitAmount}" aria-label="Unit price">` : l.kind === 'manual' ? `<input type="number" step="0.01" data-unit="${i}" value="${l.unitAmount0 ?? ''}">` : ((l.kind === 'time' && !l.lump) || l.kind === 'alloc') ? `<input type="number" step="0.01" data-rate="${i}" value="${l.unitAmount}" title="Change to override the timesheet rate">` : money(l.unitAmount)}</td>
                 <td>${l.accountCode && l.accountCode !== state.settings.accountCode ? esc(l.accountCode) : esc(state.settings.accountCode) + ' Sales'}</td><td>${l.taxType && l.taxType !== 'OUTPUT2' ? esc(l.taxType) : '15% GST on Income'}</td>
                 <td class="num">${money(l.amount)}</td>`}
                 <td><button class="btn-danger btn" data-del="${i}" aria-label="Remove line ${i + 1}">&times;</button></td>
@@ -2385,6 +2402,20 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       rowPageBreak: 'avoid', showHead: 'everyPage'
     };
     let y = my + 1;
+    // Landscaping: labour or vehicle as single lines (quantity 1 at the total cost)
+    const pdfLump = (title, lines) => {
+      lines = lines.filter(l => l.amount); if (!lines.length) return;
+      if (y > 250) { doc.addPage(); y = 18; }
+      doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text(title, M, y); y += 2;
+      doc.autoTable({ ...base, startY: y,
+        head: [['Description', 'Qty', 'Unit price', 'Amount']],
+        body: lines.map(l => [l.description || '-', hrs(l.quantity), money(l.unitAmount), money(l.amount)]),
+        ...(lines.length > 1 ? { foot: [[{ content: 'Total ' + title.toLowerCase(), colSpan: 3 }, money(lines.reduce((a, l) => a + l.amount, 0))]] } : {}),
+        columnStyles: { 1: { cellWidth: 12, halign: 'right' }, 2: { cellWidth: 22, halign: 'right' }, 3: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 1) c.cell.styles.halign = 'right'; }
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    };
 
     if (inv.sf) {
       const rate = workDays.find(d => d.rate)?.rate || 0;
@@ -2409,6 +2440,8 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
           if (c.column.index === 9 && c.section !== 'head') c.cell.styles.textColor = c.cell.raw && c.cell.raw !== '0' ? [179, 65, 47] : [46, 125, 79];
         }
       });
+    } else if (inv.land && workDays.length) {
+      pdfLump('Labour', comp.lines.filter(l => l.kind === 'time'));
     } else if (workDays.length) {
       const head = ['Date', ...(multiProj ? ['Project'] : []), 'Activities', 'Total Hours', 'Rate', 'Amount'];
       const body = workDays.map(d => [C.fmtDateNZ(d.date), ...(multiProj ? [d.project] : []), d.activityText || '-', hrs(d.hours), money(d.rate), money(d.amount)]);
@@ -2426,15 +2459,16 @@ ${inv.sf ? sfTableHTML(workDays) : (inv.land && !workDays.length) ? '' : `${inv.
       if (y > 250) { doc.addPage(); y = 18; }
       doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Materials', M, y); y += 2;
       doc.autoTable({ ...base, startY: y,
-        head: [['Month', 'Item', 'Supplier', 'Unit', 'Qty', 'Unit price', 'Amount']],
-        body: mats.map(mm => { const c = C.matCalc(mm); return [C.MONTHS[+mm.date.slice(5, 7) - 1], mm.item, mm.supplier, mm.unit, hrs(mm.qty), money(c.unitPrice), money(c.total)]; }),
-        foot: [[{ content: 'Total materials', colSpan: 6 }, money(matSum(mats))]],
-        columnStyles: { 0: { cellWidth: 14 }, 2: { cellWidth: 26 }, 3: { cellWidth: 14 }, 4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 20, halign: 'right' }, 6: { cellWidth: 24, halign: 'right' } },
-        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 4) c.cell.styles.halign = 'right'; }
+        head: [['Item', 'Unit', 'Qty', 'Unit price', 'Amount']],
+        body: mats.map(mm => { const c = C.matCalc(mm); return [mm.item, mm.unit, hrs(mm.qty), money(c.unitPrice), money(c.total)]; }),
+        foot: [[{ content: 'Total materials', colSpan: 4 }, money(matSum(mats))]],
+        columnStyles: { 1: { cellWidth: 16 }, 2: { cellWidth: 12, halign: 'right' }, 3: { cellWidth: 22, halign: 'right' }, 4: { cellWidth: 24, halign: 'right' } },
+        didParseCell: c => { if ((c.section === 'head' || c.section === 'foot') && c.column.index >= 2) c.cell.styles.halign = 'right'; }
       });
       y = doc.lastAutoTable.finalY + 8;
     }
-    if (kmDays.length) {
+    if (inv.land && kmDays.length) pdfLump('Vehicle', comp.lines.filter(l => l.kind === 'vehicle'));
+    else if (kmDays.length) {
       if (y > 250) { doc.addPage(); y = 18; }
       doc.setFont(F, 'bold'); doc.setFontSize(10); doc.setTextColor(...ink); doc.text('Vehicle', M, y); y += 2;
       doc.autoTable({ ...base, startY: y,
